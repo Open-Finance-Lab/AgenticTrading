@@ -35,18 +35,27 @@ from dashboard.backend.domain.agents.runtime import (
     describe_tradingagents_lookahead,
     normalize_runtime_config,
 )
+from dashboard.backend.infrastructure.ai_hedge_fund.billing import (
+    DecisionUsage,
+    HostedDecisionBilling,
+    parse_usage,
+)
 from dashboard.backend.infrastructure.llm.validator import (
     MAX_ORDER_SHARES,
     actions_to_executable,
     parse_actions_payload,
 )
+from dashboard.backend.infrastructure.tradingagents.billing import (
+    decision_ceiling_micro,
+)
 from dashboard.backend.infrastructure.tradingagents.bridge import (
     DEFAULT_MANAGED_GATEWAY,
+    FAILURE_MARKER,
     MANAGED_GATEWAYS,
     MANAGED_MAX_DEBATE_ROUNDS,
     MANAGED_MAX_RISK_DISCUSS_ROUNDS,
 )
-from dashboard.backend.paths import REPO_ROOT
+from dashboard.backend.paths import REPO_ROOT, venv_python
 
 # A TradingAgents decision is a multi-agent debate, and the generator retries a
 # failed date once before giving up -- so the budget covers two full passes.
@@ -146,7 +155,30 @@ class TradingAgentsRuntimeError(AgentRuntimeError):
     Deliberately *transient* by default: the backtest engine holds the step and
     keeps the run alive for these, because a timeout or a bad upstream response
     on one day says nothing about the next.
+
+    ``usage`` is what the bridge reported spending before it failed (None when
+    it reported nothing) and ``killed`` marks a decision that stopped after it
+    could call the model but left no usage report (a timeout, a signal, a
+    crash past the bridge's started marker). Together they decide both what
+    the failed decision is billed (``HostedDecisionBilling.close``) and
+    whether it counts as a call the platform paid for.
     """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        usage: Optional[DecisionUsage] = None,
+        killed: bool = False,
+    ):
+        super().__init__(message)
+        self.usage = usage
+        self.killed = killed
+
+    @property
+    def spent(self) -> bool:
+        """Whether this failure may have cost model calls."""
+        return self.killed or (self.usage is not None and self.usage.calls > 0)
 
 
 class TradingAgentsConfigurationError(
@@ -390,6 +422,23 @@ _TRANSIENT_HINTS = (
 )
 
 
+def bridge_failure_line(stderr: Optional[str]) -> str:
+    """The bridge's own failure report from a child's stderr, else ``""``.
+
+    The last marker-prefixed line, with the prefix removed. Everything else on
+    stderr is upstream's and its dependencies' logging, which is not evidence
+    about *this* failure: yfinance logs its routine, self-healing 401 "Invalid
+    Crumb" and 403 "Forbidden" responses there at ERROR, and classifying the
+    whole stream read those as a rejected platform credential and aborted
+    healthy runs. An empty result -- the child was killed before it could
+    report -- classifies as transient, which is right for an OOM kill.
+    """
+    for line in reversed(str(stderr or "").splitlines()):
+        if line.startswith(FAILURE_MARKER):
+            return line[len(FAILURE_MARKER):].strip()
+    return ""
+
+
 def classify_runtime_failure(detail: str) -> type:
     """The exception class a child failure should be raised as.
 
@@ -456,6 +505,16 @@ def select_managed_gateway(
     return DEFAULT_MANAGED_GATEWAY
 
 
+def managed_gateway_model(gateway: str) -> str:
+    """Return the model ``gateway`` runs, which is the model a run is priced on.
+
+    The deep and quick models are the same on every managed gateway today, so
+    the deep one prices every call; if they ever differ, pricing at the dearer
+    of the two keeps the Credits ceiling a ceiling.
+    """
+    return MANAGED_GATEWAYS[gateway]["deep_think_llm"]
+
+
 def managed_gateway_credential_env(gateway: str) -> str:
     """Return the name of the platform env var that funds ``gateway``.
 
@@ -476,7 +535,9 @@ class TradingAgentsSubprocessRunner:
         candidate = (
             _resolve_path(configured)
             if configured
-            else _LOCAL_RUNTIME_DIR / "bin" / "python"
+            # venv_python, not a literal bin/python: a Windows runtime venv
+            # keeps its interpreter at Scripts\python.exe (paths.py owns it).
+            else venv_python(_LOCAL_RUNTIME_DIR)
         )
         if not candidate.is_file() or not os.access(candidate, os.X_OK):
             raise TradingAgentsConfigurationError(
@@ -543,21 +604,46 @@ class TradingAgentsSubprocessRunner:
                     cwd=temp_dir,
                     capture_output=True,
                     text=True,
+                    # Named, not the locale's: on Windows that is the ANSI code
+                    # page, which cannot decode the child's UTF-8.
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=timeout_seconds,
                     env=environment,
                 )
             except subprocess.TimeoutExpired as exc:
                 raise TradingAgentsRuntimeError(
-                    f"TradingAgents runtime timed out after {timeout_seconds} seconds"
+                    f"TradingAgents runtime timed out after {timeout_seconds} seconds",
+                    killed=True,
                 ) from exc
             except OSError as exc:
+                # The interpreter never ran, so no model call was possible:
+                # neither billed nor counted.
                 raise TradingAgentsRuntimeError(
                     f"TradingAgents runtime could not start: {exc}"
                 ) from exc
 
             if result.returncode != 0:
+                reported_line = bridge_failure_line(result.stderr)
                 detail = _redact_runtime_error(
-                    result.stderr or result.stdout or "unknown error", environment
+                    reported_line
+                    or result.stderr
+                    or result.stdout
+                    or "unknown error",
+                    environment,
+                )
+                # Fail closed on spend. The bridge writes a started marker
+                # immediately before upstream can call a model and its usage
+                # before a failing exit, so: no file = stopped before any call
+                # (released, not counted); a file without a readable usage
+                # report = killed mid-decision (billed the ceiling, counted).
+                started = output_path.exists()
+                try:
+                    reported = json.loads(output_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    reported = None
+                usage = parse_usage(
+                    reported.get("usage") if isinstance(reported, dict) else None
                 )
                 # Classified rather than uniformly transient. The text is
                 # already credential-free (the bridge prints
@@ -575,19 +661,29 @@ class TradingAgentsSubprocessRunner:
                 # marker table over the child's own analysis prose, where a
                 # model writing "authentication" or "unauthorized" about a
                 # company would have aborted the run as a configuration fault.
-                raise classify_runtime_failure(result.stderr)(
+                #
+                # ⚠ And of stderr, only the bridge's own marker line: see
+                # bridge_failure_line for the yfinance logging that a scan of
+                # the whole stream misread as a credential failure.
+                raise classify_runtime_failure(reported_line)(
                     f"TradingAgents runtime failed with code "
-                    f"{result.returncode}: {detail}"
+                    f"{result.returncode}: {detail}",
+                    usage=usage,
+                    killed=started and usage is None,
                 )
+            # A clean exit ran upstream to the end, so an unreadable output
+            # spent an unknown amount: billed the ceiling, never released.
             try:
                 output = json.loads(output_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
                 raise TradingAgentsOutputError(
-                    "TradingAgents runtime did not produce valid JSON output"
+                    "TradingAgents runtime did not produce valid JSON output",
+                    killed=True,
                 ) from exc
             if not isinstance(output, dict):
                 raise TradingAgentsOutputError(
-                    "TradingAgents runtime output must be a JSON object"
+                    "TradingAgents runtime output must be a JSON object",
+                    killed=True,
                 )
             return output
 
@@ -601,11 +697,13 @@ class TradingAgentsRuntime:
         *,
         runner: Optional[TradingAgentsSubprocessRunner] = None,
         environment: Optional[Mapping[str, str]] = None,
-        billing: Optional[Any] = None,
+        billing: Optional[HostedDecisionBilling] = None,
     ):
         self.config = normalize_runtime_config(
             TRADINGAGENTS_RUNTIME_TYPE, config or {}
         )
+        # The run's Credits meter, built by the backtest child from the signed
+        # handoff; None off the API path (a CLI run bills nobody's Credits).
         self.billing = billing
         self.environment = dict(os.environ if environment is None else environment)
         # The runner reads the *same* environment this runtime resolved its
@@ -887,7 +985,8 @@ class TradingAgentsRuntime:
         """Return ``(shares, filter_reason)`` for one mapped direction.
 
         TradingAgents supplies neither number. The model is the SDK replay's:
-        buy up to a target weight of equity, sell the whole position.
+        buy up to a target weight of equity, sell the whole position -- each
+        order capped at MAX_ORDER_SHARES, the rest following on later days.
         """
         held = int(context.positions.get(symbol, 0) or 0)
         price = float(context.current_prices.get(symbol, 0) or 0)
@@ -898,7 +997,13 @@ class TradingAgentsRuntime:
         if action == "SELL":
             if held <= 0:
                 return 0, "sell_without_position"
-            return held, None
+            # Capped for the reason the BUY branch below is: an exit larger
+            # than the per-order ceiling is *rejected* by
+            # parse_actions_payload, deterministically, so every later sell
+            # day failed the same way until the failure budget aborted the
+            # run. A position past 10,000 shares is reachable (two capped
+            # buys of a sub-dollar ticker), so the exit is spread over days.
+            return min(held, MAX_ORDER_SHARES), None
         target = self._target_shares(context, price)
         if target <= 0:
             # Not a model decision, and the single likeliest cause of a
@@ -925,7 +1030,7 @@ class TradingAgentsRuntime:
         return shares, None
 
     def _sizing_diagnostics(
-        self, context: AgentRuntimeContext, symbol: str
+        self, context: AgentRuntimeContext, symbol: str, action: str = "BUY"
     ) -> Dict[str, Any]:
         """The arithmetic behind a sizing decision, recorded either way.
 
@@ -937,22 +1042,26 @@ class TradingAgentsRuntime:
         price = float(context.current_prices.get(symbol, 0) or 0)
         equity = float(context.total_equity)
         budget = equity * self.max_position_weight
+        held = int(context.positions.get(symbol, 0) or 0)
+        target = self._target_shares(context, price) if price > 0 else 0
+        # Whether the per-order ceiling shortened this order, in the direction
+        # actually traded: a buy short of its target, or an exit short of the
+        # whole position. Either is finished over later days, so an order
+        # smaller than the arithmetic implies is not a bug -- but it is not
+        # obvious either.
+        if action == "SELL":
+            order_capped = held > MAX_ORDER_SHARES
+        else:
+            order_capped = target - held > MAX_ORDER_SHARES
         return {
             "total_equity": round(equity, 2),
             "max_position_weight": self.max_position_weight,
             "position_budget": round(budget, 2) if math.isfinite(budget) else None,
             "price": round(price, 4) if math.isfinite(price) else None,
-            "held_shares": int(context.positions.get(symbol, 0) or 0),
-            "target_shares": self._target_shares(context, price) if price > 0 else 0,
+            "held_shares": held,
+            "target_shares": target,
             "max_order_shares": MAX_ORDER_SHARES,
-            # Whether the per-order ceiling shortened this order. The position
-            # is topped up over later days, so an order smaller than the
-            # target implies is not a bug -- but it is not obvious either.
-            "order_capped": bool(
-                (self._target_shares(context, price) if price > 0 else 0)
-                - int(context.positions.get(symbol, 0) or 0)
-                > MAX_ORDER_SHARES
-            ),
+            "order_capped": bool(order_capped),
         }
 
     def _trace(
@@ -979,7 +1088,7 @@ class TradingAgentsRuntime:
             "sized_quantity": shares,
             "order_emitted": False,
             "filter_reason": filter_reason,
-            "sizing": self._sizing_diagnostics(context, symbol),
+            "sizing": self._sizing_diagnostics(context, symbol, action),
             "diagnostics": diagnostics,
         }
 
@@ -1055,6 +1164,46 @@ class TradingAgentsRuntime:
     # Dispatch
     # ------------------------------------------------------------------
 
+    def _run_billed(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Run one upstream decision, held and settled on the caller's Credits.
+
+        AI Hedge Fund's lifecycle (``AiHedgeFundRuntime._run_billed``): held
+        at the ceiling before the bridge starts, settled at the metered usage
+        before the output is mapped (an output ATL then refuses still spent
+        its calls), released when the bridge stopped before any model call.
+        Every other escape, ``BaseException`` included -- a cancel or the
+        parent's timeout arrives as SIGTERM turned into ``SystemExit`` -- is
+        billed the ceiling, because the decision's calls may have run.
+        """
+        if self.billing is None:
+            return self.runner.run(payload, timeout_seconds=self.timeout_seconds)
+        ceiling = decision_ceiling_micro(
+            self.model_name, self.config.get("analysts")
+        )
+        reservation_id = self.billing.reserve(ceiling)
+        try:
+            output = self.runner.run(payload, timeout_seconds=self.timeout_seconds)
+        except TradingAgentsRuntimeError as exc:
+            self.billing.close(
+                reservation_id,
+                ceiling_micro=ceiling,
+                usage=exc.usage,
+                outcome="killed" if exc.killed else "failed",
+            )
+            raise
+        except BaseException:
+            self.billing.close(
+                reservation_id, ceiling_micro=ceiling, usage=None, outcome="killed"
+            )
+            raise
+        self.billing.close(
+            reservation_id,
+            ceiling_micro=ceiling,
+            usage=parse_usage(output.get("usage")),
+            outcome="completed",
+        )
+        return output
+
     def decide(self, context: AgentRuntimeContext) -> Dict[str, List[Dict[str, Any]]]:
         # Before anything else, including the repeat-day short circuit: a
         # roster that reads future data is wrong on every step, and a run that
@@ -1099,22 +1248,20 @@ class TradingAgentsRuntime:
         # day's row, which is the bug record_latest_execution exists to prevent.
         self._audit_row_call = None
         try:
-            output = self.runner.run(payload, timeout_seconds=self.timeout_seconds)
-        except TradingAgentsConfigurationError:
-            # Nothing was spent: the interpreter is missing, the payload was
-            # refused before `generate()`, or the gateway rejected the
-            # credential. Re-raise without counting a billed call.
-            raise
-        except TradingAgentsRuntimeError:
-            # The child ran and was killed or failed mid-flight -- a timeout
-            # after ~10 of 11 model calls is the *designed-in* outcome at the
-            # shipped 600s budget, because one decision is two upstream passes
-            # (580-830s). Those tokens are spent and discarded, so the call has
-            # to be counted: with the increment only on the success path, a
-            # five-day run whose every day timed out persisted llm_calls = 0
-            # and llm_model = "rule-based" -- reporting zero platform spend for
-            # four near-complete billed debates.
-            self.calls += 1
+            output = self._run_billed(payload)
+        except TradingAgentsRuntimeError as exc:
+            # Counted by what the child spent, not by how the failure is
+            # classified -- the two are independent. A configuration-class
+            # failure can follow billed calls (the account ran dry partway
+            # through: "insufficient_quota"), and a transient one can precede
+            # any (the interpreter could not start). A timeout after ~10 of 11
+            # model calls is the *designed-in* outcome at the shipped 600s
+            # budget, because one decision is two upstream passes (580-830s);
+            # uncounted, a run whose every day timed out persisted
+            # llm_calls = 0 and llm_model = "rule-based" for four near-complete
+            # billed debates.
+            if exc.spent:
+                self.calls += 1
             raise
         self.calls += 1
         call_index = self.calls - 1

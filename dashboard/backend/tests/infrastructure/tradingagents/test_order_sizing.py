@@ -389,7 +389,11 @@ def test_a_timed_out_decision_counts_as_a_billed_call():
     )
 
     runner = _Runner(
-        [TradingAgentsRuntimeError("TradingAgents runtime timed out after 600 seconds")]
+        [
+            TradingAgentsRuntimeError(
+                "TradingAgents runtime timed out after 600 seconds", killed=True
+            )
+        ]
     )
     runtime = _runtime(runner)
 
@@ -431,7 +435,7 @@ def test_a_timeout_does_not_rewrite_the_previous_days_execution_count():
     )
 
     runner = _Runner(
-        [_output(), TradingAgentsRuntimeError("timed out after 600 seconds")]
+        [_output(), TradingAgentsRuntimeError("timed out after 600 seconds", killed=True)]
     )
     runtime = _runtime(runner)
 
@@ -463,7 +467,7 @@ def test_a_timeout_cannot_write_to_a_row_whose_count_was_never_recorded():
     )
 
     runner = _Runner(
-        [_output(), TradingAgentsRuntimeError("timed out after 600 seconds")]
+        [_output(), TradingAgentsRuntimeError("timed out after 600 seconds", killed=True)]
     )
     runtime = _runtime(runner)
 
@@ -483,3 +487,115 @@ def test_a_timeout_cannot_write_to_a_row_whose_count_was_never_recorded():
     # Day 1's row keeps its own (unset) count; day 2's number must not land
     # on it.
     assert rows[0]["actions_executed"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 4. Exits are capped like entries.
+# ---------------------------------------------------------------------------
+
+
+def test_an_exit_above_the_per_order_cap_is_spread_over_days():
+    """A SELL of the whole position used to skip the cap the BUY branch has,
+    so parse_actions_payload rejected it -- deterministically, on every sell
+    day, until the failure budget aborted the run. Two capped buys of a
+    sub-dollar ticker are enough to get there."""
+    held = 2 * MAX_ORDER_SHARES
+    runner = _Runner([_output(rating="Sell", action="SELL")])
+    runtime = _runtime(runner, weight=1.0)
+
+    result = runtime.decide(
+        _context(total_equity=3000.0, price=0.10, positions={"AAPL": held})
+    )
+
+    assert result["actions"][0]["shares"] == MAX_ORDER_SHARES
+    trace = runtime.decision_audit_rows[0]["actions_submitted"][0]
+    assert trace["sizing"]["order_capped"] is True
+
+
+def test_an_exit_within_the_cap_sells_the_whole_position():
+    runner = _Runner([_output(rating="Sell", action="SELL")])
+    runtime = _runtime(runner)
+
+    result = runtime.decide(_context(price=50.0, positions={"AAPL": 3}))
+
+    assert result["actions"][0]["shares"] == 3
+    trace = runtime.decision_audit_rows[0]["actions_submitted"][0]
+    assert trace["sizing"]["order_capped"] is False
+
+
+# ---------------------------------------------------------------------------
+# 5. A call is counted by what the child spent, not by how it failed.
+# ---------------------------------------------------------------------------
+
+
+def test_a_fatal_failure_after_billed_calls_still_counts_the_call():
+    """The account running dry partway through a debate is classified as a
+    configuration fault (it aborts the run), but the calls before it were
+    billed. Uncounted, the run recorded llm_calls=0 and llm_model='rule-based'
+    for spend that happened."""
+    from dashboard.backend.infrastructure.ai_hedge_fund.billing import (
+        DecisionUsage,
+    )
+    from dashboard.backend.infrastructure.tradingagents.adapter import (
+        TradingAgentsConfigurationError,
+    )
+
+    runner = _Runner(
+        [
+            TradingAgentsConfigurationError(
+                "insufficient_quota",
+                usage=DecisionUsage(
+                    input_tokens=9000, output_tokens=900, calls=4, unmetered_calls=0
+                ),
+            )
+        ]
+    )
+    runtime = _runtime(runner)
+
+    with pytest.raises(TradingAgentsConfigurationError):
+        runtime.decide(_context())
+
+    assert runtime.calls == 1
+    assert runtime.decisions == 0
+
+
+def test_a_child_that_never_started_is_not_counted():
+    """The opposite direction: an interpreter that could not be launched is a
+    transient error, and it spent nothing."""
+    from dashboard.backend.infrastructure.tradingagents.adapter import (
+        TradingAgentsRuntimeError,
+    )
+
+    runner = _Runner(
+        [TradingAgentsRuntimeError("TradingAgents runtime could not start: ENOENT")]
+    )
+    runtime = _runtime(runner)
+
+    with pytest.raises(TradingAgentsRuntimeError):
+        runtime.decide(_context())
+
+    assert runtime.calls == 0
+
+
+def test_the_runner_does_not_count_a_launch_failure(monkeypatch):
+    import os
+    import sys
+
+    from dashboard.backend.infrastructure.tradingagents import adapter as module
+    from dashboard.backend.infrastructure.tradingagents.adapter import (
+        TradingAgentsRuntimeError,
+        TradingAgentsSubprocessRunner,
+    )
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("exec format error")
+
+    monkeypatch.setattr(module.subprocess, "run", refuse)
+    runner = TradingAgentsSubprocessRunner(
+        {"PATH": os.environ.get("PATH", ""), "TRADINGAGENTS_PYTHON": sys.executable}
+    )
+
+    with pytest.raises(TradingAgentsRuntimeError) as excinfo:
+        runner.run({"schema": "tradingagents-bridge-v1"}, timeout_seconds=5)
+
+    assert excinfo.value.spent is False

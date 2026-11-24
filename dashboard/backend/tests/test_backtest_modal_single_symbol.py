@@ -77,11 +77,19 @@ function el(id) {
   return els[id];
 }
 
+// One object per chip, so state a function writes to it (dataset.parked,
+// hidden, style) is still there when the next function reads the chip back.
+let chipObjs = {};
 function chipEl(ticker) {
-  return {
-    dataset: { ticker },
-    remove() { chips = chips.filter((c) => c !== ticker); },
-  };
+  if (!chipObjs[ticker]) {
+    chipObjs[ticker] = {
+      dataset: { ticker },
+      hidden: false,
+      style: {},
+      remove() { chips = chips.filter((c) => c !== ticker); },
+    };
+  }
+  return chipObjs[ticker];
 }
 
 const document = {
@@ -140,8 +148,10 @@ def _run(scenarios, extra_js=""):
             fn_body("function agentRuntimeType("),
             fn_body("function runtimeTakesSingleSymbol("),
             fn_body("function hostedRuntimeLabel("),
+            fn_body("function isParkedChip("),
             fn_body("function customUniverseSymbols("),
             fn_body("function trimCustomUniverseToOne("),
+            fn_body("function restoreParkedChips("),
             fn_body("function runtimeRequiresSignIn("),
             fn_body("function hostedRuntimeAuthRefusal("),
             fn_body("function singleSymbolUniverseRefusal("),
@@ -169,6 +179,7 @@ const scenarios = {json.dumps(scenarios)};
 const out = {{}};
 for (const [name, s] of Object.entries(scenarios)) {{
   els = {{}};
+  chipObjs = {{}};
   chips = {json.dumps(_shipped_chips())};
   selectedUniverse = 'djia';
   tabs.builtin.classes = new Set(['active']);
@@ -181,7 +192,8 @@ for (const [name, s] of Object.entries(scenarios)) {{
   if (s.chips !== undefined) chips = s.chips.slice();
   applyUniverseDefaultsForRuntime(s.agent);
   out[name] = {{
-    chips: chips.slice(),
+    domChips: chips.slice(),
+    chips: chips.filter((t) => !chipEl(t).hidden),
     activeTab: tabs.builtin.classList.contains('active') ? 'builtin' : 'custom',
     builtinTabDisabled: tabs.builtin.disabled,
     builtinTabTitle: tabs.builtin.title,
@@ -200,6 +212,7 @@ for (const [name, s] of Object.entries(scenarios)) {{
     authRefusal: hostedRuntimeAuthRefusal(s.agent),
     refusalAfterEdits: (() => {{
       if (s.editTo === undefined) return null;
+      chipObjs = {{}};
       chips = s.editTo.slice();
       return singleSymbolUniverseRefusal(s.agent);
     }})(),
@@ -212,6 +225,17 @@ for (const [name, s] of Object.entries(scenarios)) {{
       return singleSymbolUniverseRefusal(s.agent);
     }})(),
   }};
+  // The Custom universe is shared by every agent, so what this modal open did
+  // to it is observable by opening the modal again for another agent.
+  out[name].afterThen = (() => {{
+    if (s.thenAgent === undefined) return null;
+    applyUniverseDefaultsForRuntime(s.thenAgent);
+    return {{
+      domChips: chips.slice(),
+      visibleChips: chips.filter((t) => !chipEl(t).hidden),
+      symbols: customUniverseSymbols(),
+    }};
+  }})();
 }}
 process.stdout.write(JSON.stringify(out));
 """
@@ -290,6 +314,43 @@ def test_an_empty_custom_selection_is_not_silently_filled():
     # they did not choose; the submit guard refuses instead.
     out = _run({"ta": {"agent": _agent("tradingagents"), "chips": []}})
     assert out["ta"]["chips"] == []
+
+
+@_needs_node
+def test_a_single_symbol_agent_does_not_delete_the_shared_custom_universe():
+    # The regression: trimming removed chips 2..n from the DOM, so after a
+    # TradingAgents modal the next pipeline agent's Custom tab had lost them.
+    out = _run(
+        {
+            "then_pipeline": {
+                "agent": _agent("tradingagents"),
+                "thenAgent": _agent("pipeline"),
+            },
+            "then_ahf": {
+                "agent": _agent("tradingagents"),
+                "thenAgent": _agent("ai_hedge_fund"),
+            },
+        }
+    )
+    shipped = _shipped_chips()
+    for name in ("then_pipeline", "then_ahf"):
+        # What the single-symbol agent submits is still exactly one symbol...
+        assert out[name]["assets"] == [shipped[0]], name
+        # ...but the others were parked, not destroyed...
+        assert out[name]["domChips"] == shipped, name
+        # ...and the next multi-symbol open shows and submits the full set.
+        after = out[name]["afterThen"]
+        assert after["domChips"] == shipped, name
+        assert after["visibleChips"] == shipped, name
+        assert after["symbols"] == shipped, name
+
+
+@_needs_node
+def test_parked_chips_are_not_submitted_by_the_single_symbol_agent():
+    out = _run({"ta": {"agent": _agent("tradingagents")}})
+    shipped = _shipped_chips()
+    assert out["ta"]["assets"] == [shipped[0]]
+    assert out["ta"]["refusal"] == ""
 
 
 # ---------------------------------------------------------------------------

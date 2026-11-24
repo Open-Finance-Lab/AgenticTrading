@@ -202,6 +202,9 @@ from dashboard.backend.domain.backtesting.partial_results import LiveProgressHea
 from dashboard.backend.infrastructure.ai_hedge_fund.billing import (
     HostedDecisionBilling,
 )
+from dashboard.backend.infrastructure.tradingagents.billing import (
+    billing_from_handoff as tradingagents_billing_from_handoff,
+)
 from dashboard.backend.infrastructure.llm.execution.handoff import (
     ExecutionHandoffError,
     consume_execution_handoff,
@@ -430,6 +433,11 @@ def main():
             # Upstream calls its model in its own interpreter, so the handoff
             # meters whole decisions rather than driving a model client.
             hosted_billing = HostedDecisionBilling.from_handoff(
+                credits=credits_service, handoff=execution_handoff
+            )
+        elif args.runtime_type == TRADINGAGENTS_RUNTIME_TYPE:
+            # Same unit, recorded against the gateway the route priced on.
+            hosted_billing = tradingagents_billing_from_handoff(
                 credits=credits_service, handoff=execution_handoff
             )
         else:

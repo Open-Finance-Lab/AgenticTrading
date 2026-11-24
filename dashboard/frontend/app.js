@@ -7407,18 +7407,47 @@ function hostedRuntimeLabel(agent) {
     return HOSTED_RUNTIME_LABELS[runtime] || runtime;
 }
 
+/**
+ * Chips parked by `trimCustomUniverseToOne`. They stay in the DOM, so the
+ * user's custom universe survives a single-symbol agent's modal; every reader
+ * of the selection goes through here and skips them.
+ */
+function isParkedChip(chip) {
+    return chip.dataset?.parked === '1';
+}
+
 /** The tickers the user has actually chosen on the Custom tab. */
 function customUniverseSymbols() {
     return Array.from(document.querySelectorAll('#selectedChips .chip'))
+        .filter((chip) => !isParkedChip(chip))
         .map((chip) => chip.dataset.ticker)
         .filter(Boolean);
 }
 
-/** Reduce the Custom tab to its first chip, removing the rest. */
+/**
+ * Show only the first chip while a single-symbol runtime is selected.
+ *
+ * The extras are hidden, not removed: the Custom universe is shared with
+ * every other agent, and deleting chips here lost the user's tickers for the
+ * next pipeline agent they opened.
+ */
 function trimCustomUniverseToOne() {
-    const symbols = customUniverseSymbols();
-    for (const ticker of symbols.slice(1)) {
-        document.querySelector(`#selectedChips .chip[data-ticker="${ticker}"]`)?.remove();
+    const chips = Array.from(document.querySelectorAll('#selectedChips .chip'))
+        .filter((chip) => !isParkedChip(chip));
+    for (const chip of chips.slice(1)) {
+        chip.dataset.parked = '1';
+        chip.hidden = true;
+        chip.style.display = 'none';
+    }
+}
+
+/** Undo `trimCustomUniverseToOne`: the full custom universe is visible again. */
+function restoreParkedChips() {
+    for (const chip of document.querySelectorAll('#selectedChips .chip')) {
+        if (!isParkedChip(chip)) continue;
+        delete chip.dataset.parked;
+        chip.hidden = false;
+        chip.style.display = '';
     }
 }
 
@@ -7494,6 +7523,7 @@ function applyUniverseDefaultsForRuntime(agent) {
     if (singleSymbol) {
         trimCustomUniverseToOne();
     } else {
+        restoreParkedChips();
         selectPreset('djia');
     }
     if (tab) handleUniverseTabSwitch(tab);
@@ -7862,8 +7892,18 @@ function handleAddAsset() {
         return;
     }
     
-    // Check if already added
-    if (document.querySelector(`[data-ticker="${ticker}"]`)) {
+    // Check if already added. A parked chip is invisible to the user, so
+    // typing its ticker brings it back instead of reporting a duplicate.
+    const existing = document.querySelector(`[data-ticker="${ticker}"]`);
+    if (existing && isParkedChip(existing)) {
+        delete existing.dataset.parked;
+        existing.hidden = false;
+        existing.style.display = '';
+        input.value = '';
+        notifyAssetUniverseChanged();
+        return;
+    }
+    if (existing) {
         console.warn(`⚠️ ${ticker} already in custom universe`);
         input.value = '';
         return;
@@ -7972,7 +8012,8 @@ function getSelectedAssets() {
     if (!isBuiltin) {
         // Get chips from custom universe
         const chips = document.querySelectorAll('#selectedChips .chip');
-        const assets = Array.from(chips).map(chip => chip.dataset.ticker);
+        const assets = Array.from(chips).filter((chip) => !isParkedChip(chip))
+            .map(chip => chip.dataset.ticker);
         return assets.length > 0 ? assets : ['AAPL']; // Default fallback
     } else {
         // Get assets from selected built-in universe

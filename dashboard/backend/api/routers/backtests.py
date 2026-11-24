@@ -176,6 +176,13 @@ from dashboard.backend.infrastructure.tradingagents.adapter import (
     managed_gateway_credential_env as tradingagents_gateway_credential_env,
 )
 from dashboard.backend.infrastructure.tradingagents.adapter import (
+    managed_gateway_model as tradingagents_gateway_model,
+)
+from dashboard.backend.infrastructure.tradingagents.billing import (
+    decision_calls as tradingagents_decision_calls,
+    decision_ceiling_micro as tradingagents_decision_ceiling_micro,
+)
+from dashboard.backend.infrastructure.tradingagents.adapter import (
     runtime_unavailable_reason as tradingagents_runtime_unavailable_reason,
 )
 from dashboard.backend.infrastructure.tradingagents.adapter import (
@@ -2518,6 +2525,15 @@ MAX_SUBPROCESS_TIMEOUT_SECONDS = 14400
 # derived parent budget (5100s) outlives the page watching it.
 WATCHED_SUBPROCESS_TIMEOUT_SECONDS = 4200
 
+# Kept between a hosted run's largest allowed budget and the poll ceiling.
+# The page's clock starts *earlier* than the parent's: app.js stamps
+# `startedAt` when it registers the launch, before the POST is even answered,
+# while the parent's budget starts at spawn, after the route's checks. So a
+# budget that *equals* 4200 is swept from the page (`elapsed > 4200`) that
+# many seconds before the run's final status lands: the "lost contact"
+# outcome the window bound exists to prevent.
+POLL_START_MARGIN_SECONDS = 60
+
 # The smallest per-decision budget worth inverting into a window bound. One
 # upstream pass is 290-415s measured, so anything near this floor already
 # cannot finish a decision -- but the bound must not become *larger* as the
@@ -2719,11 +2735,11 @@ def _tradingagents_trading_days_ceiling() -> int:
     failure for a run that was still going. The two dials each looked in range
     on their own.
 
-    What it returns is ``floor(3600 / step)``: 6 at the shipped 600s step and
-    4 at 900s. The *default* window is ``min(5, ceiling)``, so the shipped
-    behaviour is 5 days either way -- this docstring previously claimed the
-    ceiling itself was 5 and 3, conflating the two, and the test that checked
-    it re-derived the same expression and so pinned nothing.
+    What it returns is ``floor((4200 - 600 - 60) / step)``: 5 at the shipped
+    600s step and 3 at 900s. The 60 is ``POLL_START_MARGIN_SECONDS``: without
+    it the ceiling was ``floor(3600 / step)``, and 600s x 6 days + 600 (or
+    900s x 4 + 600) is exactly 4200 -- a run using its whole budget ended at
+    the instant the page stopped watching it.
     """
     try:
         step_seconds = max(1, int(resolve_tradingagents_step_timeout_seconds()))
@@ -2733,7 +2749,11 @@ def _tradingagents_trading_days_ceiling() -> int:
         # at module scope in this module once killed app boot; the launch path
         # reports the real configuration error to the operator who set it.
         step_seconds = _FALLBACK_TRADINGAGENTS_STEP_TIMEOUT_SECONDS
-    usable = WATCHED_SUBPROCESS_TIMEOUT_SECONDS - SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
+    usable = (
+        WATCHED_SUBPROCESS_TIMEOUT_SECONDS
+        - SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
+        - POLL_START_MARGIN_SECONDS
+    )
     # Floored before the division. TRADINGAGENTS_TIMEOUT_SECONDS is legal from
     # 1, and inverting a 1-second budget yielded a 3600-trading-day ceiling --
     # a ~14-year window, accepted by a bound whose whole job is to refuse a
@@ -3433,6 +3453,39 @@ def _enforce_ai_hedge_fund_credits(
             calls=sessions * ai_hedge_fund_decision_calls(analysts, ticker_count),
             needed_micro=sessions
             * ai_hedge_fund_decision_ceiling_micro(model_id, analysts, ticker_count),
+        ),
+        byok_available=False,
+    )
+
+
+def _enforce_tradingagents_credits(
+    *,
+    user_id: int,
+    model_id: str,
+    analysts: Optional[Sequence[str]],
+    start_date: str,
+    end_date: str,
+    market: object = None,
+) -> Optional[_CreditsClaim]:
+    """Refuse a TradingAgents run its owner's Credits cannot hold to the end.
+
+    ``_enforce_ai_hedge_fund_credits`` for the other hosted runtime: one
+    decision per trading session, each at the child's own per-decision ceiling
+    (``tradingagents/billing.py``), through the shared admission so every
+    Credits lane on one balance counts the others. Without it this lane spent
+    the operator's gateway account for any signed-in account, unreserved and
+    uncapped.
+    """
+    sessions = _estimated_trading_sessions(start_date, end_date, market=market)
+    if sessions <= 0:
+        return None
+    return _admit_platform_credits(
+        user_id=user_id,
+        model_id=model_id,
+        estimate=_PlatformCreditsEstimate(
+            calls=sessions * tradingagents_decision_calls(analysts),
+            needed_micro=sessions
+            * tradingagents_decision_ceiling_micro(model_id, analysts),
         ),
         byok_available=False,
     )
@@ -4544,6 +4597,14 @@ def run_backtest_endpoint(
                 status_code=422,
                 detail="TradingAgents requires decision_source='llm'.",
             )
+        if billing_mode is BillingMode.BYOK:
+            # As for AI Hedge Fund: the model is platform-managed, so there is
+            # no key of the caller's to bill; refused rather than silently
+            # switched lanes.
+            raise HTTPException(
+                status_code=422,
+                detail="TradingAgents runs on ATL Credits only; it has no BYOK option.",
+            )
         # Authentication first, before anything that spends or describes the
         # deployment. A TradingAgents run bills the platform's own gateway
         # account for 11 sequential model calls per trading day and needs no
@@ -4898,6 +4959,41 @@ def run_backtest_endpoint(
             model_id=model,
             analysts=(runtime_config or {}).get("analysts"),
             ticker_count=len(selected_assets or ()) or len(profile.symbols),
+            start_date=start_date,
+            end_date=end_date,
+            market=profile.market,
+        )
+        execution_handoff_payload = create_execution_handoff(
+            user_id=int(user_id),
+            run_id=live_run_id,
+            billing_mode=billing_mode,
+            provider_id=provider_id,
+            provider_ids=provider_ids,
+            model_id=model,
+            prompt_metadata={
+                "start_date": start_date,
+                "end_date": end_date,
+                "runtime_type": runtime_type,
+                "runtime_config": runtime_config,
+                "data_source": data_source,
+                "assets": selected_assets,
+                "universe_selection": universe_selection,
+            },
+        )
+
+    elif runtime_type == TRADINGAGENTS_RUNTIME_TYPE:
+        # The AI Hedge Fund branch above, on the gateway this deployment pays
+        # with. `_validate_tradingagents_runtime` already proved the selection
+        # resolves and its credential is set; the child selects from the same
+        # environment, so the lane held here is the account that pays.
+        billing_mode = BillingMode.PLATFORM_CREDITS
+        provider_id = tradingagents_select_managed_gateway()
+        provider_ids = (provider_id,)
+        model = tradingagents_gateway_model(provider_id)
+        credits_claim = _enforce_tradingagents_credits(
+            user_id=int(user_id),
+            model_id=model,
+            analysts=(runtime_config or {}).get("analysts"),
             start_date=start_date,
             end_date=end_date,
             market=profile.market,

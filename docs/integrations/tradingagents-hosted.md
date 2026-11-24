@@ -177,10 +177,15 @@ no API surfaces the file. Do not wire it into a response.
   are recreated and discarded per call. Market data is re-fetched each day and
   the reflection layer never accumulates history. This is the price of the
   credential isolation; giving it a durable path is a separate decision.
-- **Not metered against credits.** Hosted runtimes bypass the per-token
-  reservation path, which is gated on `runtime_type == "pipeline"`. AI Hedge
-  Fund is in the same position. `agent_runs.llm_calls` still counts every
-  hosted call, so the leaderboard integrity guard sees an honest number.
+- **Metered per decision, not per call.** A run bills the caller's ATL
+  Credits the way AI Hedge Fund does (`tradingagents/billing.py`, reusing
+  `ai_hedge_fund/billing.HostedDecisionBilling`): the route admits the window
+  at its ceiling and signs a handoff for the deployment's gateway; the child
+  holds each decision at `decision_ceiling_micro` before the bridge runs and
+  settles it at the token usage the bridge's langchain meter reports. A
+  decision the meter could not count (no hook API, unmetered calls, a kill
+  with no report) settles at the ceiling; one that stopped before any model
+  call is released. BYOK is refused (422): the model is platform-managed.
 - **Model pin is provisional.** `bridge.py` pins both the deep-think and
   quick-think models to ATL's registered OpenRouter default. A test asserts the
   two cannot drift apart. The right pair for TradingAgents specifically is still
@@ -193,89 +198,28 @@ whether it blocks merging. They are listed most urgent first. Nothing here was
 decided unilaterally; where a safe fallback existed it is already in place and
 is named.
 
-### 1. Anonymous requests can still reach AI Hedge Fund's platform spend
+### 1. Anonymous requests reaching hosted platform spend -- resolved
 
-**Current.** `POST /backtest/run` gates LLM runs on a signed-in account only
-for `runtime_type == "pipeline"` (`run_backtest_endpoint`, the
-`user_id is None -> 401` branch). Hosted runtimes skipped it. Cloning a
-marketplace template with a self-chosen `X-Session-Id` makes the caller that
-agent's owner, because `owner_browser_session` is set from that header, so an
-unauthenticated caller could launch a run billed to the platform's own gateway
-account.
-
-**Done here.** TradingAgents now requires an account
-(`_require_signed_in_for_tradingagents`), checked before the roster, window and
-readiness checks so an anonymous caller cannot probe the deployment's
-credential state either. Pinned by
+Hosted runs used to skip the route's `user_id is None -> 401` gate, so a
+caller who cloned a marketplace template under a self-chosen `X-Session-Id`
+owned that agent and could launch a run on the platform's gateway account.
+Both hosted runtimes are now sign-in-only: main's runtime-generic gate
+(`runtime_type != PIPELINE_RUNTIME_TYPE and user_id is None`) answers 401
+before the roster, window and readiness checks, so an anonymous caller cannot
+probe the deployment's credential state either. Pinned by
 `test_anonymous_session_cannot_launch_a_platform_paid_tradingagents_run`.
 
-**Still open.** The AI Hedge Fund lane has the same pre-existing
-unauthenticated-access gap and was left untouched here: it is shipped
-behaviour, and requiring an account for it is a product decision. The
-per-agent Financial Datasets credential it needs is a data-access barrier,
-not an authentication one.
+### 2. Per-account hosted spend -- resolved by Credits metering
 
-**Reproduction withheld from this public file.** This repository is public and the AI Hedge Fund lane is not yet fixed, so the step-by-step call sequence and the zero-cost test-based demonstration are not written here. They have been moved to a private maintainer note (see the hand-off to Felix). Maintainers can confirm the exposure from that note; no live request is needed.
-
-**Blast radius.** Caller: anyone on the internet -- no account, no email, no
-payment method. Per accepted run: one upstream subprocess per trading day, up
-to `MAX_AI_HEDGE_FUND_TRADING_DAYS` (default 10), each doing its own LLM
-calls on the platform's gateway. Concurrency bound: only the instance-wide
-`MAX_ACTIVE_DASHBOARD_BACKTESTS` (5) actually holds -- the route's own
-the per-client `FixedWindowRateLimiter(10, 3600)` is keyed on a
-caller-supplied value (`client_key`, `api/rate_limit.py:208-219`) and so does
-not bound a client that varies it. There is no Credits debit on this lane, so
-nothing draws down and nothing alerts; the first signal is the gateway balance.
-
-**Options.** (a) Extend the same gate to AI Hedge Fund, which makes both
-hosted runtimes sign-in-only and is one line. (b) Leave it and accept that any
-visitor can spend the operator's gateway balance. (c) Rate-limit anonymous
-hosted runs instead of refusing them.
-
-**Recommendation: (a).** It reuses the gate that already exists and matches
-what the pipeline lane has required since the execution layer shipped.
-
-**Blocks merge?** Not for this branch -- TradingAgents fails closed. It is a
-live production exposure for AI Hedge Fund regardless of this branch.
-
-### 2. Hosted runs are not metered, so spend is unbounded per account
-
-**Current.** Both hosted runtimes bypass the reservation/settlement path
-entirely (it is gated on the pipeline runtime). A signed-in account can
-therefore start runs until `MAX_ACTIVE_DASHBOARD_BACKTESTS` (5) is reached,
-repeatedly, with no Credits debit and no per-account budget. One TradingAgents
-run is 11 sequential model calls per trading day, up to
-`MAX_TRADINGAGENTS_TRADING_DAYS` (5) days.
-
-**Why it matters.** The sign-in gate above ties spend to an identity but does
-not bound it, and the bounds that look like they apply do not:
-
-- The route's own limiter (`FixedWindowRateLimiter(10, 3600)`) is keyed on a
-  caller-supplied value, so it does not bound a client that varies that value.
-- `_max_concurrent_for_user` grants a signed-in account its
-  `max_concurrent_backtests` entitlement, default 5 -- the same as
-  `MAX_ACTIVE_DASHBOARD_BACKTESTS` -- so one account can hold every slot on
-  the instance continuously.
-- Signup is open, and one run is ~55 sequential model calls (11 per decision
-  x 5 trading days).
-
-So the control today is "any account", not "any account with balance".
-
-**Demonstration withheld from this public file.** A concrete, zero-cost demonstration of the limiter bypass and the slot-exhaustion case is in the private maintainer note rather than here, for the same reason as section 1.
-
-**Options.** (a) Route hosted runs through the existing
-`LLMExecutionService` reservation path -- correct, but the bridge reports no
-token usage back, so there is nothing to settle against; it needs a flat
-per-decision estimate first. (b) A per-account daily cap on hosted runs,
-reusing `user_entitlements`. (c) Leave unmetered and watch the gateway
-balance.
-
-**Recommendation: (b) now, (a) when the bridge can report usage.** (b) is a
-bound rather than an accounting system, which is what the risk actually is.
-
-**Blocks merge?** A judgement call. The branch is honest about it (this
-section, and the "Not metered against credits" limit above), and the exposure
-is no worse per-account than AI Hedge Fund's today.
+Sign-in tied spend to an identity without bounding it: the route's limiter is
+keyed on a caller-supplied value, an account's default entitlement is every
+slot on the instance, and signup is open. Both hosted runtimes now bill the
+caller's ATL Credits (see "Metered per decision" under Known limits), so the
+bound is the account's balance, admitted at the window's ceiling against every
+other Credits run on that balance (`_admit_platform_credits`). The ceiling
+budgets (8 fixed nodes + 4 calls per analyst) x 2 attempts at 16k input / 2k
+output tokens per call; at CommonStack's Haiku 4.5 that is about $0.62 per
+decision, held and then settled at what the meter counted.
 
 ### 3. The default analyst roster is one analyst
 
@@ -373,26 +317,31 @@ was poller-safe only by arithmetic coincidence and an operator raising
 `TRADINGAGENTS_TIMEOUT_SECONDS` to 900 silently got a 5-day window with a
 5100s budget -- the page reporting failure for a run still in progress, after
 the user had paid for decisions they could no longer see. Both dials looked in
-range on their own. The ceiling now inverts the poller bound, which leaves the
-shipped default unchanged at 5 days and makes 900s yield 4.
+range on their own. The ceiling now inverts the poller bound less a 60s
+margin (`POLL_START_MARGIN_SECONDS`), which leaves the shipped default
+unchanged at 5 days and makes 900s yield 3. The margin exists because the
+page's clock starts *before* the parent's -- `app.js` stamps the launch before
+the POST answers -- so a budget exactly equal to 4200s is swept from the page
+just before the run's final status lands.
 
 **Two self-consistent schemes.** Both are reachable today, pinned by tests.
 
 | | step | days | parent budget | covers 2 attempts? | visible to the page? |
 |---|---|---|---|---|---|
 | **A: shipped** | 600s | 5 | 3600s | no | yes, 600s of margin |
-| **B: retry-safe** | 900s | 4 | 4200s | yes (830s worst case) | yes, exactly at the bound |
+| **B: retry-safe** | 900s | 3 | 3300s | yes (830s worst case) | yes, 900s of margin |
 
-The derived *ceiling* is `floor(3600/step)` -- 6 at 600s, 4 at 900s -- while
-the shipped *default* is `min(5, ceiling)`. The two are different numbers and
-an earlier draft of this table conflated them. An operator who raises
-`MAX_TRADINGAGENTS_TRADING_DAYS` to the ceiling gets a budget of exactly
-4200s, which the page still watches (it gives up strictly above) but with no
-margin; the default keeps 600s.
+The derived *ceiling* is `floor((4200 - 600 - 60)/step)` -- 5 at 600s, 3 at
+900s -- while the shipped *default* is `min(5, ceiling)`. The two are
+different numbers and an earlier draft of this table conflated them. Before
+the margin the ceiling was `floor(3600/step)` (6 at 600s, 4 at 900s), whose
+largest window had a budget of exactly 4200s; that was claimed safe because
+the page gives up strictly above the bound, which missed that the page's
+clock starts first.
 
 **Recommendation: B**, set from the Render dashboard with no deploy. A killed
 second attempt is the one failure that costs money and returns nothing, and
-the window loses one day. A is the status quo and is safe, just wasteful on a
+the window loses two days. A is the status quo and is safe, just wasteful on a
 failing day.
 
 **Not an option without a decision:** raising the poller bound in `app.js`,

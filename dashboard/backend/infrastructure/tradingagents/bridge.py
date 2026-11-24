@@ -17,11 +17,14 @@ nor the SDK would reject a crafted config, so this is the last place that can.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import contextvars
 import json
 import re
 import sys
+import threading
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 # Platform-managed gateways. The *deployment* picks one (see the adapter's
 # ``select_managed_gateway``); a payload may only ever *match* an entry, never
@@ -93,6 +96,14 @@ _ALLOWED_CONFIG_KEYS = (
 
 
 _COMMIT_RE = re.compile(r"([0-9a-f]{40})")
+
+# Prefix of the one stderr line the bridge writes about its own failure. The
+# adapter classifies that line alone (``classify_runtime_failure``) and never
+# the rest of stderr, which also carries upstream's and yfinance's logging --
+# where routine transient errors ("Unauthorized / Invalid Crumb", "403
+# Forbidden") would otherwise read as a rejected platform credential and abort
+# a healthy run.
+FAILURE_MARKER = "ATL_BRIDGE_FAILURE: "
 
 # Upstream's five-tier scale, and the label pattern its parser looks for.
 # Both mirror ``tradingagents/agents/utils/rating.py`` at the pinned revision.
@@ -354,7 +365,84 @@ def _sanitized_message(error: BaseException) -> str:
         return f"{type(error).__name__}: detail withheld (sanitizer unavailable)"
 
 
-def _decide(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _reported_usage(response) -> Optional[Dict[str, int]]:
+    """One model call's ``input_tokens``/``output_tokens``, or None if unreported."""
+    try:
+        usage = response.generations[0][0].message.usage_metadata
+    except (AttributeError, IndexError, TypeError):
+        return None
+    if not isinstance(usage, dict):
+        return None
+    counts = {}
+    for key in ("input_tokens", "output_tokens"):
+        value = usage.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        counts[key] = value
+    return counts
+
+
+def _usage_meter():
+    """A context manager yielding a meter of every model call (None without one).
+
+    A copy of the AI Hedge Fund bridge's meter (this script must stay
+    importable without ``dashboard.backend``). It counts calls as well as
+    tokens, so a call that came back without usage is an *unmetered* call ATL
+    bills at the decision ceiling rather than a free one, and it is registered
+    as an inheritable context-var hook so it also sees the calls LangGraph runs
+    on worker threads. Without langchain-core's hook API it yields None, and
+    ATL bills the ceiling.
+    """
+    try:
+        from langchain_core.callbacks import BaseCallbackHandler
+        from langchain_core.tracers.context import register_configure_hook
+    except ImportError:
+        return contextlib.nullcontext()
+
+    class UsageMeter(BaseCallbackHandler):
+        def __init__(self) -> None:
+            super().__init__()
+            self._lock = threading.Lock()
+            self._totals = {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "calls": 0,
+                "unmetered_calls": 0,
+            }
+
+        def on_llm_end(self, response, **_kwargs) -> None:
+            usage = _reported_usage(response)
+            with self._lock:
+                self._totals["calls"] += 1
+                if usage is None:
+                    self._totals["unmetered_calls"] += 1
+                    return
+                for key, value in usage.items():
+                    self._totals[key] += value
+
+        def report(self) -> dict:
+            with self._lock:
+                return dict(self._totals)
+
+    @contextlib.contextmanager
+    def metered():
+        meter = UsageMeter()
+        meter_var = contextvars.ContextVar("atl_usage_meter", default=None)
+        register_configure_hook(meter_var, inheritable=True)
+        token = meter_var.set(meter)
+        try:
+            yield meter
+        finally:
+            meter_var.reset(token)
+
+    return metered()
+
+
+def _usage_report(meter) -> Optional[dict]:
+    return meter.report() if meter is not None else None
+
+
+def _decide(payload: Dict[str, Any], output_path: Path) -> Dict[str, Any]:
     _disable_dotenv_loading()
     # Resolves only inside the isolated environment, never ATL's own.
     from agentictrading.integrations._tradingagents_core import (
@@ -369,12 +457,29 @@ def _decide(payload: Dict[str, Any]) -> Dict[str, Any]:
     # at one keeps the generator's detailed (already sanitized) message instead
     # of collapsing to its generic all-dates-failed text.
     generator = TradingAgentsDecisionGenerator(max_consecutive_failures=1)
-    artifact = generator.generate(
-        symbol=str(payload.get("symbol") or ""),
-        analysis_dates=[analysis_date],
-        config=config,
-        selected_analysts=analysts,
-    )
+    # Written once the payload has been validated and immediately before
+    # upstream can make a model call. A failed exit that leaves only this
+    # marker (an OOM SIGKILL, a crash before the usage write) spent an unknown
+    # amount, and ATL bills it the ceiling; no file at all means the bridge
+    # stopped before any call was possible, which ATL releases for free.
+    output_path.write_text(json.dumps({"started": True}), encoding="utf-8")
+    with _usage_meter() as meter:
+        try:
+            artifact = generator.generate(
+                symbol=str(payload.get("symbol") or ""),
+                analysis_dates=[analysis_date],
+                config=config,
+                selected_analysts=analysts,
+            )
+        except BaseException:
+            # A failed decision may still have spent model calls; ATL bills
+            # what was used, so report it before the non-zero exit.
+            output_path.write_text(
+                json.dumps({"started": True, "usage": _usage_report(meter)}),
+                encoding="utf-8",
+            )
+            raise
+        usage = _usage_report(meter)
     record = artifact.decisions[0]
     # Checked against the raw text, not the parsed rating, and only on a record
     # the SDK already accepted: see unsupported_rating_label for why the two
@@ -384,6 +489,10 @@ def _decide(payload: Dict[str, Any]) -> Dict[str, Any]:
     if record.status == "valid":
         stated = unsupported_rating_label(record.raw_final_trade_decision)
         if stated:
+            # The calls were made: leave their usage behind for settlement.
+            output_path.write_text(
+                json.dumps({"started": True, "usage": usage}), encoding="utf-8"
+            )
             raise BridgeOutputError(
                 f"TradingAgents stated an unsupported rating {stated!r}; "
                 f"upstream's parser answered {record.rating!r} from elsewhere "
@@ -396,6 +505,7 @@ def _decide(payload: Dict[str, Any]) -> Dict[str, Any]:
         # contract, shared with the CLI and the replay path, and this is a fact
         # about the *installed environment* rather than about the analysis.
         "upstream_commit": _upstream_commit(),
+        "usage": usage,
         "decision": {
             "analysis_date": record.analysis_date,
             "rating": record.rating,
@@ -424,19 +534,23 @@ def main() -> None:
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
+    output_path = Path(args.output)
     try:
         payload = json.loads(Path(args.input).read_text(encoding="utf-8"))
-        output = _decide(payload)
+        output = _decide(payload, output_path)
+        # Inside the try, so an output that fails to serialize is reported as
+        # a failure rather than leaving the started marker behind as if the
+        # bridge had been killed. Each call has its own temporary directory, so
+        # no earlier step's file can be read as this one's.
+        output_path.write_text(json.dumps(output), encoding="utf-8")
     except Exception as exc:  # noqa: BLE001 - the traceback is the leak
         # `generate()` re-raises initialization failures with `from exc`, so
         # letting this propagate would print the original exception -- and any
         # credential in it -- to the stderr the adapter captures and persists.
-        sys.stderr.write(_sanitized_message(exc) + "\n")
+        # Marker-prefixed and last, because it is the only stderr line the
+        # adapter classifies.
+        sys.stderr.write(FAILURE_MARKER + _sanitized_message(exc) + "\n")
         raise SystemExit(1) from None
-
-    # Written only on success: a stale file would let the adapter read a
-    # previous step's decision as this step's.
-    Path(args.output).write_text(json.dumps(output), encoding="utf-8")
 
 
 if __name__ == "__main__":

@@ -655,8 +655,11 @@ def test_bridge_blocks_dotenv_for_the_pinned_legacy_dependency():
         assert dotenv.load_dotenv() is False
         assert dotenv_main.load_dotenv() is False
     finally:
-        dotenv.load_dotenv = public_loader
-        dotenv_main.load_dotenv = module_loader
+        # setattr, not assignment: restoring a monkeypatch, not rebinding the
+        # attribute ATL's own `from dotenv import load_dotenv` call sites read
+        # (CodeQL py/import-of-mutable-attribute).
+        setattr(dotenv, "load_dotenv", public_loader)
+        setattr(dotenv_main, "load_dotenv", module_loader)
 
 
 def test_bridge_returns_upstream_analyst_signals(monkeypatch, tmp_path):

@@ -61,6 +61,7 @@ def run_picker(script, setup=""):
         fn_body("function runtimeRequiresSignIn("),
         fn_body("function hostedRuntimeAuthRefusal("),
         fn_body("function hostedRuntimeLabel("),
+        fn_body("function isParkedChip("),
         fn_body("function customUniverseSymbols("),
         fn_body("function singleSymbolUniverseRefusal("),
         fn_body("async function runBacktest("),

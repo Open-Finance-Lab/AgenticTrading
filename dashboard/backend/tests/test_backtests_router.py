@@ -4219,8 +4219,11 @@ def _stub_tradingagents_deployment(monkeypatch):
     monkeypatch.setattr(bt, "tradingagents_runtime_unavailable_reason", lambda: None)
 
 
-def _stub_tradingagents_installed(monkeypatch):
+def _stub_tradingagents_installed(monkeypatch, credits=None):
     """Make the deployment look able to host the runtime, and sign the caller in.
+
+    Also funds the caller: a TradingAgents run is priced on ATL Credits at
+    launch, so a case that is not about the balance gets one that holds it.
 
     The sign-in belongs here because it is a precondition of *reaching* the
     runtime at all: a TradingAgents run bills the platform's own gateway, so
@@ -4229,6 +4232,9 @@ def _stub_tradingagents_installed(monkeypatch):
     A case that wants the anonymous path calls neither.
     """
     _stub_tradingagents_deployment(monkeypatch)
+    monkeypatch.setattr(
+        bt, "credits_service", credits or _FakeBalanceCredits(50_000_000)
+    )
     _sign_in(monkeypatch)
 
 
@@ -4275,7 +4281,92 @@ def test_tradingagents_backtest_dispatches_the_hosted_runtime(client, monkeypatc
     # would read wall-clock-current data for a historical date.
     assert spy.last_kwargs["runtime_config"]["analysts"] == ["market"]
     assert spy.last_kwargs["financial_datasets_api_key"] is None
-    assert spy.last_kwargs["model"] is None
+    # The caller's model is ignored; the gateway's pinned model runs and is
+    # what the handoff names, so the child's `--model` check holds.
+    assert spy.last_kwargs["model"] == bt.tradingagents_gateway_model(
+        bt.tradingagents_select_managed_gateway()
+    )
+
+
+def _post_tradingagents_run(client, monkeypatch, credits, **body):
+    """Launch the cloned TradingAgents agent as a signed-in, funded caller on
+    the OpenRouter gateway. Returns the response, the worker spy and the
+    handoffs the route signed."""
+    spy = _Spy()
+    handoffs = []
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setattr(
+        bt, "create_execution_handoff", lambda **kw: handoffs.append(kw) or "h"
+    )
+    monkeypatch.setenv("TRADINGAGENTS_GATEWAY", "openrouter")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "platform-openrouter-test-key")
+    _stub_tradingagents_installed(monkeypatch, credits)
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = _create_tradingagents_agent(client, headers)
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-04",
+            "end_date": "2026-05-06",
+            "decision_source": "llm",
+            "assets": ["AAPL"],
+            "agent_id": agent["agent_id"],
+            **body,
+        },
+        headers=headers,
+    )
+    return response, spy, handoffs
+
+
+def test_tradingagents_run_bills_credits_through_a_signed_handoff(
+    client, monkeypatch
+):
+    """The operator's gateway no longer pays unreserved for any signed-in
+    account: the run is admitted on the caller's Credits and the child holds
+    and settles each decision against the gateway the route priced on."""
+    response, spy, handoffs = _post_tradingagents_run(
+        client, monkeypatch, _FakeBalanceCredits(50_000_000)
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["billing_mode"] == "platform_credits"
+    assert response.json()["provider_id"] == "openrouter"
+    [handoff] = handoffs
+    assert handoff["user_id"] == 7
+    assert handoff["run_id"] == response.json()["run_id"]
+    assert handoff["billing_mode"] is BillingMode.PLATFORM_CREDITS
+    assert handoff["provider_ids"] == ("openrouter",)
+    assert handoff["model_id"] == "nvidia/nemotron-3-nano-30b-a3b"
+    assert spy.last_kwargs["execution_handoff_payload"] == "h"
+    assert spy.last_kwargs["model"] == handoff["model_id"]
+    [(admitted_run, estimate)] = bt._owner_platform_credit_slots(7)
+    assert admitted_run == response.json()["run_id"] and estimate > 0
+
+
+def test_tradingagents_run_its_balance_cannot_hold_is_refused_with_402(
+    client, monkeypatch
+):
+    credits = _FakeBalanceCredits(1_000)
+
+    response, spy, handoffs = _post_tradingagents_run(client, monkeypatch, credits)
+
+    assert response.status_code == 402, response.text
+    assert "API key" not in response.json()["detail"]
+    assert credits.balance_reads == [7]
+    assert handoffs == [] and spy.calls == 0
+
+
+def test_tradingagents_refuses_byok_instead_of_switching_lanes(client, monkeypatch):
+    credits = _FakeBalanceCredits(50_000_000)
+
+    response, spy, handoffs = _post_tradingagents_run(
+        client, monkeypatch, credits, billing_mode="byok"
+    )
+
+    assert response.status_code == 422
+    assert "ATL Credits only" in response.json()["detail"]
+    assert credits.balance_reads == []
+    assert spy.calls == 0
 
 
 def _sign_in(monkeypatch, user_id=7):
@@ -4706,9 +4797,12 @@ def test_the_retry_safe_pairing_is_reachable(monkeypatch):
     Measured: one pass is 290-415s for a single-analyst roster, so two are
     580-830s. 900s is the only legal step budget that covers that worst case
     (MAX_TIMEOUT_SECONDS is 900), and at 900s the window bound comes out at
-    4 days -- 900 x 4 + 600 = 4200, exactly the poller bound, which the page
-    still shows because it gives up strictly above it. This asserts the
-    pairing exists; which pairing to ship is a decision for the team.
+    3 days. It was 4 -- 900 x 4 + 600 = 4200, exactly the poller bound -- on
+    the reasoning that the page gives up strictly above it; but the page's
+    clock starts before the parent's (it stamps the launch before the POST
+    answers), so a budget equal to the bound is swept from the page just
+    before the run ends. This asserts the pairing exists; which pairing to
+    ship is a decision for the team.
     """
     import importlib
 
@@ -4718,8 +4812,8 @@ def test_the_retry_safe_pairing_is_reachable(monkeypatch):
     monkeypatch.delenv("MAX_TRADINGAGENTS_TRADING_DAYS", raising=False)
     reloaded = importlib.reload(m)
     try:
-        assert reloaded.MAX_TRADINGAGENTS_TRADING_DAYS == 4
-        assert 900 * 4 + 600 == reloaded.WATCHED_SUBPROCESS_TIMEOUT_SECONDS
+        assert reloaded.MAX_TRADINGAGENTS_TRADING_DAYS == 3
+        assert 900 * 3 + 600 < reloaded.WATCHED_SUBPROCESS_TIMEOUT_SECONDS
     finally:
         monkeypatch.undo()
         importlib.reload(m)
@@ -4744,16 +4838,27 @@ def test_no_pairing_covers_two_attempts_over_five_days():
     assert five_day_budget > m.WATCHED_SUBPROCESS_TIMEOUT_SECONDS
 
 
-def test_tradingagents_trading_days_ceiling_is_derived_not_hardcoded():
-    """Same inputs as ``_backtest_subprocess_timeout``, inverted, so the bound
-    and the budget cannot disagree about how big a window is."""
+@pytest.mark.parametrize(
+    "step_seconds, ceiling", [("600", 5), ("900", 3), ("300", 11), ("1", 59)]
+)
+def test_tradingagents_trading_days_ceiling_ends_before_the_page_stops_watching(
+    monkeypatch, step_seconds, ceiling
+):
+    """Pinned as numbers, not by re-deriving the expression under test.
+
+    The largest allowed window's parent budget must end *strictly before*
+    the 4200s poll ceiling: the page starts polling after the parent's clock
+    starts, so a budget equal to 4200 (600s x 6 + 600, or 900s x 4 + 600, the
+    old ceilings) ended as the page reported "lost contact".
+    """
     import dashboard.backend.api.routers.backtests as m
 
-    usable = (
-        m.WATCHED_SUBPROCESS_TIMEOUT_SECONDS - m.SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
-    )
-    step = m.resolve_tradingagents_step_timeout_seconds()
-    assert m._tradingagents_trading_days_ceiling() == max(1, usable // step)
+    monkeypatch.setenv("TRADINGAGENTS_TIMEOUT_SECONDS", step_seconds)
+    got = m._tradingagents_trading_days_ceiling()
+
+    assert got == ceiling
+    budget = max(int(step_seconds), 60) * got + m.SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
+    assert budget < m.WATCHED_SUBPROCESS_TIMEOUT_SECONDS
 
 
 def test_zero_max_tradingagents_trading_days_turns_the_runtime_off(

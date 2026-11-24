@@ -536,8 +536,8 @@ def test_the_runner_still_aborts_on_a_real_configuration_fault_in_stderr(
             returncode=1,
             stdout="## Market\nPrices rose.",
             stderr=(
-                "TradingAgentsDependencyError: TradingAgents is required to "
-                "generate decisions."
+                "ATL_BRIDGE_FAILURE: TradingAgentsDependencyError: TradingAgents "
+                "is required to generate decisions.\n"
             ),
         )
 
@@ -551,3 +551,74 @@ def test_the_runner_still_aborts_on_a_real_configuration_fault_in_stderr(
 
     with pytest.raises(TradingAgentsConfigurationError):
         runner.run({"schema": "tradingagents-bridge-v1"}, timeout_seconds=5)
+
+
+def _runner_failing_with(monkeypatch, stderr):
+    import os
+    import subprocess
+    import sys
+
+    from dashboard.backend.infrastructure.tradingagents import adapter as module
+    from dashboard.backend.infrastructure.tradingagents.adapter import (
+        TradingAgentsSubprocessRunner,
+    )
+
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *_a, **_k: subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr=stderr
+        ),
+    )
+    runner = TradingAgentsSubprocessRunner(
+        {"PATH": os.environ.get("PATH", ""), "TRADINGAGENTS_PYTHON": sys.executable}
+    )
+    with pytest.raises(TradingAgentsRuntimeError) as excinfo:
+        runner.run({"schema": "tradingagents-bridge-v1"}, timeout_seconds=5)
+    return excinfo.value
+
+
+# yfinance logs these at ERROR on its own retries; they say nothing about the
+# platform's gateway credential.
+_YFINANCE_NOISE = (
+    'ERROR:yfinance:{"code":"Unauthorized","description":"Invalid Crumb"}\n'
+    "ERROR:yfinance:403 Client Error: Forbidden for url: https://query2.finance"
+    ".yahoo.com/v10/finance/quoteSummary/AAPL\n"
+    "WARNING:urllib3:permission denied while reading proxy settings\n"
+)
+
+
+def test_upstream_logging_on_stderr_does_not_abort_a_transient_failure(monkeypatch):
+    """Only the bridge's marker line is classified. Scanning all of stderr read
+    yfinance's routine retry noise as a rejected credential and threw away the
+    run -- and every decision already paid for."""
+    error = _runner_failing_with(
+        monkeypatch,
+        _YFINANCE_NOISE
+        + "ATL_BRIDGE_FAILURE: TradingAgentsGenerationError: 529 overloaded\n",
+    )
+
+    assert not isinstance(error, TradingAgentsConfigurationError)
+    # The message carries the bridge's report, not the noise above it.
+    assert "529 overloaded" in str(error)
+    assert "Invalid Crumb" not in str(error)
+
+
+def test_a_child_killed_before_reporting_is_transient_whatever_it_logged(
+    monkeypatch,
+):
+    error = _runner_failing_with(monkeypatch, _YFINANCE_NOISE)
+
+    assert not isinstance(error, TradingAgentsConfigurationError)
+
+
+def test_the_last_marker_line_wins():
+    from dashboard.backend.infrastructure.tradingagents.adapter import (
+        bridge_failure_line,
+    )
+
+    assert bridge_failure_line(
+        "ATL_BRIDGE_FAILURE: first\nnoise\nATL_BRIDGE_FAILURE: second\nmore noise\n"
+    ) == "second"
+    assert bridge_failure_line("no marker here") == ""
+    assert bridge_failure_line(None) == ""

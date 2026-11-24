@@ -11,7 +11,7 @@ import os
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -317,12 +317,15 @@ def test_ai_hedge_fund_run_persists_bounded_decision_audit(patched_engine):
     assert persisted_run_id == run_id
     assert len(rows) == runtime.calls
     assert rows[0]["decision_source"] == AI_HEDGE_FUND_RUNTIME_TYPE
-    assert rows[0]["context_ref"] == "2026-03-02"
+    # The window's first session (Mon 2026-03-02) is decided too, its cutoff
+    # the previous NYSE session from the calendar (Fri 2026-02-27): hosted
+    # runtimes load no bars before the window.
+    assert rows[0]["context_ref"] == "2026-02-27"
     assert rows[0]["actions_executed"] == 0
     assert rows[0]["actions_submitted"] == [
         {
-            "decision_date": "2026-03-03",
-            "data_cutoff_date": "2026-03-02",
+            "decision_date": "2026-03-02",
+            "data_cutoff_date": "2026-02-27",
             "ticker": "AAPL",
             "upstream_action": "hold",
             "upstream_quantity": 0,
@@ -804,7 +807,9 @@ def test_hosted_run_that_never_reached_the_model_is_not_attributed_to_it(
     # With no prior market date for any bar, every step holds before it can
     # dispatch -- the "first trading date of the run" case, generalized.
     monkeypatch.setattr(
-        engine_mod, "_prior_market_date_by_decision_date", lambda timestamps: {}
+        engine_mod,
+        "_prior_market_date_by_decision_date",
+        lambda timestamps, **_kwargs: {},
     )
     bt.run_agent_backtest()
 
@@ -1107,17 +1112,39 @@ def test_a_billed_call_that_decided_nothing_is_not_counted_as_coverage(
     assert run["llm_decisions"] == decided
 
 
-def test_a_step_with_no_prior_market_date_is_recorded_rather_than_held_silently(
+def test_the_windows_first_session_is_decided_on_the_previous_nyse_session(
     patched_engine,
 ):
     """A one-day window consists of exactly this step.
 
-    The first ATL trading date has no strictly earlier market date, so the
-    runtime holds rather than inventing a cutoff -- correct, but it used to be
-    unrecorded, and a one-day backtest therefore completed as a clean run that
-    had never asked the model anything.
+    Hosted runtimes load no bars before the window, so the first session has
+    no earlier bar. It used to be skipped: a one-day window ran to "success"
+    having asked the model nothing, and every N-day window made N-1
+    decisions. Its cutoff now comes from the exchange calendar.
     """
     bt = _tradingagents_backtester(_TradingAgentsBuyRunner(), "ta-first-day")
+    bt.run_agent_backtest()
+
+    run = patched_engine.runs[0]
+    meta = run["metadata"]
+    assert meta.get("runtime_skipped_steps", 0) == 0
+    _persisted_run_id, rows = patched_engine.decisions[0]
+    assert rows[0]["timestamp"].startswith("2026-03-02")
+    assert rows[0]["context_ref"] == "2026-02-27"
+
+
+def test_a_step_with_no_prior_market_date_is_recorded_rather_than_held_silently(
+    patched_engine, monkeypatch
+):
+    """Off the US calendar the first session still has no cutoff, and the
+    runtime holds rather than inventing one -- recorded, so the run says so."""
+    bt = _tradingagents_backtester(_TradingAgentsBuyRunner(), "ta-first-day-cn")
+    real = engine_mod._prior_market_date_by_decision_date
+    monkeypatch.setattr(
+        engine_mod,
+        "_prior_market_date_by_decision_date",
+        lambda timestamps, **_kwargs: real(timestamps, market="CN"),
+    )
     bt.run_agent_backtest()
 
     meta = patched_engine.runs[0]["metadata"]
@@ -1125,4 +1152,20 @@ def test_a_step_with_no_prior_market_date_is_recorded_rather_than_held_silently(
     assert meta["runtime_skipped_step_samples"][0]["reason"] == (
         "no_market_date_before_decision"
     )
+
+
+def test_the_first_sessions_cutoff_skips_holidays_and_weekends():
+    from datetime import datetime as _dt
+
+    stamps = [_dt(2026, 1, 20, 15), _dt(2026, 1, 21, 15)]
+    # Tue 2026-01-20 follows the MLK holiday and a weekend.
+    us = engine_mod._prior_market_date_by_decision_date(stamps, market="US")
+    assert us[date(2026, 1, 20)] == date(2026, 1, 16)
+    assert us[date(2026, 1, 21)] == date(2026, 1, 20)
+    # No exchange calendar elsewhere: left undecided rather than guessed.
+    assert engine_mod._prior_market_date_by_decision_date(stamps)[
+        date(2026, 1, 20)
+    ] is None
+    # Hurricane Sandy (Mon-Tue) beside a weekend: four non-sessions.
+    assert engine_mod._previous_nyse_session(date(2012, 10, 31)) == date(2012, 10, 26)
 

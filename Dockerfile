@@ -32,7 +32,7 @@ RUN pip install --no-cache-dir --no-deps -r requirements.txt \
 # already provisioned here, and building both before `pip uninstall -y uv`
 # keeps one cleanup step instead of two. Each venv ends with an import check,
 # so a bad pin fails the build rather than shipping an image whose hosted
-# runtime 503s at request time.
+# runtime 503s at request time; each also checks its bridge's Credits meter.
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
 RUN pip install --no-cache-dir uv \
     && uv python install 3.12 \
@@ -46,6 +46,7 @@ RUN pip install --no-cache-dir uv \
        -r requirements-tradingagents.txt \
     && /opt/tradingagents-venv/bin/python -c \
        "from tradingagents.graph.trading_graph import TradingAgentsGraph" \
+    && /opt/tradingagents-venv/bin/python -c "from langchain_core.callbacks import BaseCallbackHandler; from langchain_core.tracers.context import register_configure_hook" \
     && pip uninstall -y uv
 
 # Copy dashboard application

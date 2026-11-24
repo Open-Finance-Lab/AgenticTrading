@@ -432,7 +432,8 @@ def test_hosted_agents_never_send_a_model_or_a_pipeline():
     assert out["ta"]["subAgents"] == [{"id": "sub_x", "prompt": "old"}]
 
     assert out["pipeline"]["sendPipeline"] is True
-    assert out["pipeline"]["runtime_config"] if False else True
+    # A pipeline agent sends no analyst roster (`selected` is read off the
+    # PATCH body's runtime_config).
     assert out["pipeline"]["selected"] is None
     assert out["pipeline"]["subAgents"][0]["prompt"] == "buy the dip"
 
@@ -678,3 +679,52 @@ def test_a_pipeline_agent_is_never_refused_for_an_empty_roster():
     # prompt-only save.
     out = _run({"pipeline": {"agent": _agent("pipeline"), "instruction": "buy"}})
     assert out["pipeline"]["rosterRefusal"] == ""
+
+
+@_needs_node
+def test_signing_in_after_a_401_refetches_the_hosted_runtime_models():
+    """A signed-out answer must not be cached for the life of the page.
+
+    The regression: the 401 branch returned null but left the resolved promise
+    cached, so a visitor who opened a hosted agent signed out and then signed
+    in on the same page kept reading "sign in to see it" until a full reload.
+    Only the catch branch cleared the cache.
+    """
+    script = f"""
+const API_BASE = '';
+let hostedRuntimeModels = null;
+let hostedRuntimeModelsPromise = null;
+let hostedRuntimeModelsState = 'pending';
+let signedIn = false;
+let calls = 0;
+async function fetchWithTimeout() {{
+  calls += 1;
+  if (!signedIn) return {{ status: 401, ok: false }};
+  return {{
+    status: 200,
+    ok: true,
+    json: async () => ({{ runtimes: {{ tradingagents: {{ model: 'm' }} }} }}),
+  }};
+}}
+{_lift("async function loadHostedRuntimeModels(")}
+(async () => {{
+  const first = await loadHostedRuntimeModels();
+  const stateSignedOut = hostedRuntimeModelsState;
+  signedIn = true;
+  const second = await loadHostedRuntimeModels();
+  const third = await loadHostedRuntimeModels();
+  process.stdout.write(JSON.stringify({{
+    first, stateSignedOut, second, third, calls,
+    state: hostedRuntimeModelsState,
+  }}));
+}})();
+"""
+    out = run_node(script)
+    assert out["first"] is None
+    assert out["stateSignedOut"] == "signed-out"
+    # Signing in makes the next call ask the server again.
+    assert out["second"] == {"tradingagents": {"model": "m"}}
+    assert out["state"] == "ready"
+    # And a good answer is cached: the third call does not fetch.
+    assert out["third"] == out["second"]
+    assert out["calls"] == 2

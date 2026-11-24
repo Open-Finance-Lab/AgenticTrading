@@ -17,7 +17,7 @@ be extracted in a later phase.
 import inspect
 import json
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from math import ceil
 # `from time import ...`, not `import time`. This module used to import
 # `datetime.time` too, to build the A-share session bounds inline, and the two
@@ -156,6 +156,9 @@ from dashboard.backend.infrastructure.market_data.sessions import (
     frames_open_stamped_minutes,
     is_in_session,
 )
+from dashboard.backend.infrastructure.market_data.us_market_calendar import (
+    is_trading_day as is_nyse_trading_day,
+)
 from dashboard.backend.infrastructure.market_data.profiles import (
     IFIND_ASHARE,
     LLM_DECISION_SOURCE,
@@ -252,15 +255,43 @@ def _unfilled_order_events(order_events) -> List[Dict]:
     ]
 
 
+# How far back the first decision day's cutoff is looked for. NYSE's longest
+# run of non-sessions since 2004 is four days (a holiday weekend, and the
+# 2012 Hurricane Sandy closure beside one), so two weeks is never the limit.
+_PRIOR_SESSION_SEARCH_DAYS = 14
+
+
+def _previous_nyse_session(day: date) -> Optional[date]:
+    """The latest NYSE trading day strictly before ``day``, by the calendar."""
+    for offset in range(1, _PRIOR_SESSION_SEARCH_DAYS + 1):
+        candidate = day - timedelta(days=offset)
+        if is_nyse_trading_day(candidate):
+            return candidate
+    return None
+
+
 def _prior_market_date_by_decision_date(
-    timestamps,
+    timestamps, *, market: Optional[str] = None
 ) -> Dict[date, Optional[date]]:
-    """Map each ATL trading date to its latest strictly earlier trading date."""
+    """Map each ATL trading date to its latest strictly earlier trading date.
+
+    Inside the window that is the loaded bars' previous date. The window's
+    first date has no earlier bar -- hosted runtimes fetch no indicator pad --
+    so on the US market it falls back to the previous NYSE session from the
+    exchange calendar (holidays and unscheduled closures included), never to a
+    calendar subtraction. Without the fallback the first day could not be
+    decided at all: a one-day window ran to "success" having asked the model
+    nothing, and every N-day window made N-1 decisions. Elsewhere there is no
+    exchange calendar in the codebase, so the first day stays undecided.
+    """
     market_dates = sorted({timestamp.date() for timestamp in timestamps})
-    return {
+    mapping: Dict[date, Optional[date]] = {
         decision_date: market_dates[index - 1] if index else None
         for index, decision_date in enumerate(market_dates)
     }
+    if market_dates and str(market or "").upper() == "US":
+        mapping[market_dates[0]] = _previous_nyse_session(market_dates[0])
+    return mapping
 
 
 def _accepts_keyword(function, name: str, *, via_var_keyword: bool = True) -> bool:
@@ -2212,7 +2243,9 @@ class HourlyBacktester:
         # cutoff strictly before the decision day, and an empty one makes the
         # runtime hold every step while the run still looks healthy.
         prior_market_dates = (
-            _prior_market_date_by_decision_date(all_timestamps)
+            _prior_market_date_by_decision_date(
+                all_timestamps, market=getattr(self.profile, "market", None)
+            )
             if self.runtime_type != PIPELINE_RUNTIME_TYPE
             else {}
         )

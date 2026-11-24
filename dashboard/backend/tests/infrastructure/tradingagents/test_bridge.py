@@ -333,11 +333,10 @@ def test_bridge_failure_reaches_stderr_without_the_credential_or_a_traceback(
     assert "failed to initialize TradingAgents" in stderr
 
 
-def test_bridge_writes_no_output_file_when_the_analysis_fails(
-    monkeypatch, tmp_path
-):
-    """A stale or partial output file would let the adapter parse a previous
-    step's decision as this step's."""
+def test_a_failed_analysis_leaves_its_usage_but_no_decision(monkeypatch, tmp_path):
+    """The file a failed call leaves is the started marker plus whatever the
+    meter counted -- what the parent settles the Credits hold on -- and never a
+    decision the adapter could trade on."""
     _install_fake_upstream(
         monkeypatch, propagate_error=RuntimeError("upstream unavailable")
     )
@@ -346,7 +345,39 @@ def test_bridge_writes_no_output_file_when_the_analysis_fails(
     with pytest.raises(SystemExit):
         _run_bridge(monkeypatch, tmp_path, _payload())
 
+    reported = json.loads(output_path.read_text(encoding="utf-8"))
+    assert reported["started"] is True
+    assert "usage" in reported
+    assert "decision" not in reported
+
+
+def test_a_payload_refused_before_upstream_leaves_no_file(monkeypatch, tmp_path):
+    """No file is how the parent knows no model call was possible, so it
+    releases the hold and counts no call. The marker must therefore come after
+    the payload checks, not before."""
+    _install_fake_upstream(monkeypatch)
+    output_path = tmp_path / "output.json"
+    payload = _payload()
+    payload["analysis_dates"] = ["2026-03-13", "2026-03-16"]
+
+    with pytest.raises(SystemExit):
+        _run_bridge(monkeypatch, tmp_path, payload)
+
     assert not output_path.exists()
+
+
+def test_the_failure_report_is_the_marker_prefixed_last_stderr_line(
+    monkeypatch, tmp_path, capsys
+):
+    _install_fake_upstream(
+        monkeypatch, propagate_error=RuntimeError("upstream unavailable")
+    )
+
+    with pytest.raises(SystemExit):
+        _run_bridge(monkeypatch, tmp_path, _payload())
+
+    lines = [line for line in capsys.readouterr().err.splitlines() if line.strip()]
+    assert lines[-1].startswith(bridge.FAILURE_MARKER)
 
 
 @pytest.fixture
@@ -360,8 +391,11 @@ def restore_dotenv():
     try:
         yield dotenv, dotenv_main
     finally:
-        dotenv.load_dotenv = public_loader
-        dotenv_main.load_dotenv = module_loader
+        # setattr, not assignment: restoring a monkeypatch, not rebinding
+        # the module attribute ATL's own `from dotenv import load_dotenv`
+        # call sites read (CodeQL py/import-of-mutable-attribute).
+        setattr(dotenv, "load_dotenv", public_loader)
+        setattr(dotenv_main, "load_dotenv", module_loader)
 
 
 def test_bridge_blocks_dotenv_so_a_user_env_file_is_never_read(restore_dotenv):
@@ -604,3 +638,159 @@ def test_the_contradiction_would_otherwise_have_become_a_sell(
     assert output["decision"]["rating"] == "Sell"
     assert output["decision"]["atl_action"] == "SELL"
 
+
+
+# --------------------------------------------------------------------------
+# Credits meter: what the parent settles each decision's hold on
+# --------------------------------------------------------------------------
+
+
+def _fake_langchain(monkeypatch):
+    """Fake the two langchain-core names the meter uses (the AI Hedge Fund
+    bridge's tests do the same): ``BaseCallbackHandler`` and
+    ``register_configure_hook``, which here records the meter's context var so
+    a fake model call can reach the active meter the way a real callback
+    manager does. Returns a function that reads the active meter."""
+    import types
+
+    hooks = []
+    callbacks = types.ModuleType("langchain_core.callbacks")
+    callbacks.BaseCallbackHandler = type("BaseCallbackHandler", (), {})
+    context = types.ModuleType("langchain_core.tracers.context")
+    context.register_configure_hook = (
+        lambda var, inheritable: hooks.append((var, inheritable))
+    )
+    tracers = types.ModuleType("langchain_core.tracers")
+    tracers.context = context
+    core = types.ModuleType("langchain_core")
+    core.callbacks = callbacks
+    core.tracers = tracers
+    for name, module in (
+        ("langchain_core", core),
+        ("langchain_core.callbacks", callbacks),
+        ("langchain_core.tracers", tracers),
+        ("langchain_core.tracers.context", context),
+    ):
+        monkeypatch.setitem(sys.modules, name, module)
+
+    def active_meter():
+        var, inheritable = hooks[-1]
+        # Inheritable, or LangGraph's worker-thread calls go unseen.
+        assert inheritable is True
+        return var.get()
+
+    return active_meter
+
+
+def _model_call(meter, usage_metadata):
+    import types
+
+    message = types.SimpleNamespace(usage_metadata=usage_metadata)
+    meter.on_llm_end(
+        types.SimpleNamespace(generations=[[types.SimpleNamespace(message=message)]])
+    )
+
+
+def _metered_propagate(monkeypatch, active_meter, usages):
+    """Make each upstream pass report ``usages`` as model calls first."""
+    real = _FakeGraph.propagate
+
+    def propagate(self, symbol, analysis_date):
+        for usage in usages:
+            _model_call(active_meter(), usage)
+        return real(self, symbol, analysis_date)
+
+    monkeypatch.setattr(_FakeGraph, "propagate", propagate)
+
+
+def _usage(input_tokens, output_tokens, *, calls, unmetered_calls=0):
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "calls": calls,
+        "unmetered_calls": unmetered_calls,
+    }
+
+
+def test_bridge_reports_summed_usage_with_the_decision(monkeypatch, tmp_path):
+    _install_fake_upstream(monkeypatch)
+    active_meter = _fake_langchain(monkeypatch)
+    _metered_propagate(
+        monkeypatch,
+        active_meter,
+        [
+            {"input_tokens": 900, "output_tokens": 90},
+            {"input_tokens": 100, "output_tokens": 10},
+        ],
+    )
+
+    output = _run_bridge(monkeypatch, tmp_path, _payload())
+
+    assert output["usage"] == _usage(1000, 100, calls=2)
+    assert output["decision"]["status"] == "valid"
+
+
+def test_bridge_counts_a_call_without_usage_as_unmetered(monkeypatch, tmp_path):
+    _install_fake_upstream(monkeypatch)
+    active_meter = _fake_langchain(monkeypatch)
+    _metered_propagate(
+        monkeypatch,
+        active_meter,
+        [{"input_tokens": 900, "output_tokens": 90}, {"input_tokens": 5}],
+    )
+
+    output = _run_bridge(monkeypatch, tmp_path, _payload())
+
+    assert output["usage"] == _usage(900, 90, calls=2, unmetered_calls=1)
+
+
+def test_bridge_reports_usage_spent_before_a_failure(monkeypatch, tmp_path):
+    """Both of the SDK's attempts ran their calls before failing; the parent
+    settles on what they spent rather than on the ceiling."""
+    _install_fake_upstream(
+        monkeypatch, propagate_error=RuntimeError("upstream unavailable")
+    )
+    active_meter = _fake_langchain(monkeypatch)
+    _metered_propagate(
+        monkeypatch, active_meter, [{"input_tokens": 50, "output_tokens": 5}]
+    )
+    output_path = tmp_path / "output.json"
+
+    with pytest.raises(SystemExit):
+        _run_bridge(monkeypatch, tmp_path, _payload())
+
+    reported = json.loads(output_path.read_text(encoding="utf-8"))
+    assert reported["started"] is True
+    assert reported["usage"]["calls"] >= 1
+    assert reported["usage"]["input_tokens"] == 50 * reported["usage"]["calls"]
+
+
+def test_bridge_marks_itself_started_before_upstream_can_call_the_model(
+    monkeypatch, tmp_path
+):
+    _install_fake_upstream(monkeypatch)
+    output_path = tmp_path / "output.json"
+    seen = {}
+    real = _FakeGraph.propagate
+
+    def propagate(self, symbol, analysis_date):
+        seen["at_call"] = json.loads(output_path.read_text(encoding="utf-8"))
+        return real(self, symbol, analysis_date)
+
+    monkeypatch.setattr(_FakeGraph, "propagate", propagate)
+
+    _run_bridge(monkeypatch, tmp_path, _payload())
+
+    assert seen["at_call"] == {"started": True}
+
+
+def test_bridge_without_the_callback_hook_api_reports_none(monkeypatch, tmp_path):
+    """An older langchain-core: the meter cannot attach, so the parent bills
+    the ceiling rather than reading a missing report as free."""
+    _install_fake_upstream(monkeypatch)
+    _fake_langchain(monkeypatch)
+    monkeypatch.setitem(sys.modules, "langchain_core.tracers.context", None)
+
+    output = _run_bridge(monkeypatch, tmp_path, _payload())
+
+    assert output["usage"] is None

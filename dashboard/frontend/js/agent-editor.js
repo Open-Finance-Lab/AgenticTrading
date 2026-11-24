@@ -459,6 +459,8 @@
   async function loadHostedRuntimeModels() {
     if (hostedRuntimeModels) return hostedRuntimeModels;
     if (!hostedRuntimeModelsPromise) {
+      // A retry (after a 401 or a failure) is a fresh wait, not the old answer.
+      hostedRuntimeModelsState = 'pending';
       hostedRuntimeModelsPromise = (async () => {
         try {
           const response = await fetchWithTimeout(
@@ -470,6 +472,9 @@
             // The route needs an account, like running a hosted backtest
             // does. Say so rather than reporting a failure.
             hostedRuntimeModelsState = 'signed-out';
+            // Do not cache this answer: the visitor can sign in on this same
+            // page, and the next open must ask the server again.
+            hostedRuntimeModelsPromise = null;
             return null;
           }
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
