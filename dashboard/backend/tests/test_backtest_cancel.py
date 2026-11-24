@@ -594,6 +594,11 @@ def test_backtest_run_refuses_an_over_long_hosted_window(client, monkeypatch):
         json={},
         headers=headers,
     ).json()["agent"]
+    # Signed in after the guest clone: a guest is refused 401 before the window.
+    monkeypatch.setattr(
+        "dashboard.backend.api.dependencies._optional_user",
+        lambda *_args, **_kwargs: {"id": 7},
+    )
 
     response = client.post(
         "/backtest/run",

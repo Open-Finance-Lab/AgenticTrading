@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=161">
+    <link rel="stylesheet" href="styles.css?v=162">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -35,6 +35,7 @@
             // old ?view=paper links land on My Agents instead of a dead panel.
             paper: { page: 'playground', playgroundTab: 'agents' },
             agents: { page: 'playground', playgroundTab: 'agents' },
+            'portfolio-management': { page: 'playground', playgroundTab: 'portfolio-management' },
             marketplace: { page: 'community' },
             playground: { page: 'playground', playgroundTab: 'agents' },
             'my-algo': { page: 'playground', playgroundTab: 'agents' },
@@ -155,13 +156,16 @@
     html[data-nav-boot][data-nav-page="competition"] .primary-nav [data-mode="competition"] { background-color: var(--info-color); color: white; }
     html[data-nav-boot][data-nav-page="community"] .primary-nav [data-mode="community"] { background-color: var(--info-color); color: white; }
     html[data-nav-boot][data-nav-page="playground"] .playground-subtabs .subtab-btn.active { background: transparent; color: var(--text-secondary); }
+    html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="portfolio-management"] .playground-subtabs [data-playground-tab="portfolio-management"],
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="agents"] .playground-subtabs [data-playground-tab="agents"],
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="backtest"] .playground-subtabs [data-playground-tab="backtest"],
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="paper"] .playground-subtabs [data-playground-tab="paper"] { background: var(--info-color); color: white; }
+    html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="portfolio-management"] #playgroundAgentsPanel,
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="backtest"] #playgroundAgentsPanel,
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="paper"] #playgroundAgentsPanel { display: none !important; }
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="backtest"] .main-container.playground-backtest-panel { display: grid !important; }
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="paper"] #paperTradingView { display: block !important; }
+    html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="portfolio-management"] #playgroundPortfolioManagementPanel { display: block !important; }
     html[data-nav-boot][data-nav-page="competition"] .competition-subtabs .subtab-btn.active { background: transparent; color: var(--text-secondary); }
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="live"] .competition-subtabs [data-competition-tab="live"],
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="leaderboard"] .competition-subtabs [data-competition-tab="leaderboard"],
@@ -568,7 +572,7 @@
                                     <span>AI models only &middot; ranked by return</span>
                                 </div>
                                 <div class="hm-rank-table-head" aria-hidden="true">
-                                    <span>#</span><span>AI Model</span><span>Ending value</span><span>Return</span><span title="Risk-adjusted return, annualized from hourly results.">Sharpe</span>
+                                    <span>#</span><span>AI Model</span><span>Ending value</span><span>Return</span><span title="Sharpe ratio. Return above what cash would have earned, divided by how much the daily returns swung, scaled to a yearly figure. Hover a value for its 95% interval.">Sharpe</span>
                                 </div>
                                 <ol class="home-module-rank-list" id="homeModuleRankList">
                                     <li class="home-module-rank-empty">Loading the standings&hellip;</li>
@@ -952,10 +956,12 @@
     <!-- Playground -->
     <div id="playgroundView" class="page-view playground-view" style="display: none;">
         <div class="subtab-bar playground-subtabs">
+            <button class="subtab-btn" data-playground-tab="portfolio-management">Portfolio Management</button>
             <button class="subtab-btn active" data-playground-tab="agents">My Agents</button>
             <button class="subtab-btn" data-playground-tab="backtest">Backtest</button>
             <button class="subtab-btn subtab-btn--disabled" data-playground-tab="paper" disabled aria-disabled="true" title="Paper trading is not available">Paper Trading</button>
         </div>
+        <div id="playgroundPortfolioManagementPanel" class="playground-panel" style="display: none;"><p>Loading Portfolio Management…</p></div>
         <div id="playgroundAgentsPanel" class="playground-panel">
             <!-- My Portfolio: Overview + Capital Allocation (live ledger when signed in, sample data for guests).
                  Hidden while paper trading is switched off (PAPER_TRADING_ENABLED in app.js): the
@@ -1730,7 +1736,7 @@
                                 <tr>
                                     <th class="name-col">Entry</th>
                                     <th class="num-col sortable" data-sort="return" title="Return since the 1st of the month">Return <span class="sort-arrow" aria-hidden="true"></span></th>
-                                    <th class="num-col sortable" data-sort="sharpe" title="Annualized; noisy until a few weeks of sessions">Sharpe <span class="sort-arrow" aria-hidden="true"></span></th>
+                                    <th class="num-col sortable" data-sort="sharpe" title="Sharpe ratio. Return above what cash would have earned, divided by how much the daily returns swung, scaled to a yearly figure. Shown from 5 trading days, always with its 95% interval.">Sharpe <span class="sort-arrow" aria-hidden="true"></span></th>
                                     <th class="num-col sortable" data-sort="dd" title="Largest peak-to-trough drop this month">Max DD <span class="sort-arrow" aria-hidden="true"></span></th>
                                     <th class="num-col sortable" data-sort="trades" title="Orders filled this month">Trades <span class="sort-arrow" aria-hidden="true"></span></th>
                                     <th class="num-col sortable" data-sort="hold" title="Average time a share was held before it was sold. Closed positions only; calendar time.">Avg hold <span class="sort-arrow" aria-hidden="true"></span></th>
@@ -1873,7 +1879,7 @@
                                     <th class="name-col">Entry</th>
                                     <th class="portfolio-col sortable" data-sort="value">Value <span class="sort-arrow" aria-hidden="true"></span></th>
                                     <th class="return-col sortable" data-sort="return">Return <span class="sort-arrow" aria-hidden="true"></span></th>
-                                    <th class="sharpe-col sortable" data-sort="sharpe">Sharpe <span class="sort-arrow" aria-hidden="true"></span></th>
+                                    <th class="sharpe-col sortable" data-sort="sharpe" title="Sharpe ratio. Return above what cash would have earned, divided by how much the daily returns swung, scaled to a yearly figure. Shown from 5 trading days, always with its 95% interval.">Sharpe <span class="sort-arrow" aria-hidden="true"></span></th>
                                     <th class="dd-col sortable" data-sort="dd">Max DD <span class="sort-arrow" aria-hidden="true"></span></th>
                                 </tr>
                             </thead>
@@ -2523,21 +2529,24 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=18" defer></script>
     <script src="js/backtest-comparison.js?v=1" defer></script>
-    <script src="app.js?v=166" defer></script>
-    <script src="js/analytics.js?v=1" defer></script>
-    <script src="js/agent-editor.js?v=38" defer></script>
+    <script src="app.js?v=167" defer></script>
+    <script src="js/analytics.js?v=2" defer></script>
+    <script src="js/agent-editor.js?v=39" defer></script>
     <script src="js/credit-format.js?v=1" defer></script>
     <script src="js/credits.js?v=8" defer></script>
     <script src="js/admin-credits.js?v=9" defer></script>
     <script src="js/admin-tabs.js?v=12" defer></script>
-    <script src="js/leaderboard.js?v=38" defer></script>
-    <script src="js/live-leaderboard.js?v=5" defer></script>
-    <script src="home-page.js?v=55" defer></script>
+    <script src="js/leaderboard.js?v=39" defer></script>
+    <script src="js/live-leaderboard.js?v=7" defer></script>
+    <script src="home-page.js?v=56" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and
          market-events/marketEventRelativeTime.js (formatMarketEventRelativeTime),
          both loaded above — not beside the market-events/* block, which loads
          before app.js. -->
     <script src="home-news-signals.js" defer></script>
+    <!-- The Portfolio Management subtab: the recording first, then the page that plays it. -->
+    <script src="js/portfolio-management-data.js?v=1" defer></script>
+    <script src="js/portfolio-management.js?v=1" defer></script>
     <!-- Never `hidden`: a live region has to stay rendered to be monitored. It
          hides itself visually via .app-toast's opacity + pointer-events. -->
     <div id="appToast" class="app-toast" role="status" aria-live="polite"></div>

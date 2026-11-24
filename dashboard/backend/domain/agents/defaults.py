@@ -31,7 +31,11 @@ SIMPLE_INSTRUCTION_LABEL = "Trading instruction"
 # a meaningful backtest without opening Configure first.
 #
 # Worded for how the engine actually executes, because the model is told none of
-# it: orders fill in whole shares, and a sell always closes the whole position.
+# it: orders fill in whole shares, and a sell sells the qty it names (#661; it
+# closed the whole position whatever its qty until then). Rule 3's strategy is
+# still a full exit, so it now says which qty that takes. Agents seeded before
+# that change keep the old sentence; the pipeline's EXECUTION RULES state the
+# sell rule on every run for them.
 # The closing "Orders:" paragraph exists because a short run tolerates almost no
 # malformed replies before it aborts. Those replies are checked by
 # pipeline_runner.pipeline_output_to_decision and the strict_llm block in
@@ -69,7 +73,8 @@ DEFAULT_STARTER_INSTRUCTION = (
     "nothing. Never trade on small moves.\n"
     "3. Sell a stock only when its trend has clearly broken: price at least "
     "2% below its 20-hour average (sma20) AND momentum (macd) below its "
-    "signal line (macd_signal). A sell always closes the whole position.\n"
+    "signal line (macd_signal). A sell should close the whole position: set "
+    "its qty to all the shares you hold.\n"
     "4. Reinvest cash quickly. When cash is above 10% of the account, buy the "
     "stock you own the least of among those with price above sma20, macd "
     "above macd_signal and RSI below 75. If none qualifies, buy the stock you "
@@ -83,6 +88,20 @@ DEFAULT_STARTER_INSTRUCTION = (
     "keep the total cost of all buys within available cash. If you make no "
     'trades, return one "hold" order for any listed stock. Keep each reason '
     "under 15 words."
+)
+
+# Earlier wordings of DEFAULT_STARTER_INSTRUCTION, still the platform default
+# for is_default_instruction_pipeline. Seeding is write-once, so an unedited
+# starter made before a rewording still runs the old text, and every run it
+# recorded names it; without these, both would read as a user's own
+# instruction the day the wording moved.
+PRIOR_STARTER_INSTRUCTIONS = (
+    # Until #661 a sell closed the whole position whatever its qty.
+    DEFAULT_STARTER_INSTRUCTION.replace(
+        "A sell should close the whole position: set its qty to all the "
+        "shares you hold.",
+        "A sell always closes the whole position.",
+    ),
 )
 
 def starter_agent_description(name: str) -> str:
@@ -262,11 +281,12 @@ def is_default_instruction_pipeline(pipeline: Any) -> bool:
     if len(steps) != 1:
         return False
     step = steps[0]
+    defaults = (DEFAULT_STARTER_INSTRUCTION, *PRIOR_STARTER_INSTRUCTIONS)
     return all(
-        str(step.get(field) or "").strip() == expected.strip()
+        str(step.get(field) or "").strip() in {text.strip() for text in expected}
         for field, expected in (
-            ("label", SIMPLE_INSTRUCTION_LABEL),
-            ("prompt", DEFAULT_STARTER_INSTRUCTION),
-            ("outputFormat", SIMPLE_INSTRUCTION_OUTPUT_FORMAT),
+            ("label", (SIMPLE_INSTRUCTION_LABEL,)),
+            ("prompt", defaults),
+            ("outputFormat", (SIMPLE_INSTRUCTION_OUTPUT_FORMAT,)),
         )
     )

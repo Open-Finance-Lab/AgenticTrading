@@ -34,6 +34,7 @@ from dashboard.backend.infrastructure.llm.http_policy import (
     call_with_retries,
     provider_http_timeout,
 )
+from dashboard.backend.paths import child_python
 
 # Resolves to the ``dashboard/`` directory — identical to the previous
 # ``Path(__file__).resolve().parent.parent`` when this module lived at
@@ -143,19 +144,6 @@ def _default_backtest_dates() -> tuple[str, str]:
             # swallow an unrelated attribute bug.
             _report_unusable_defaults(f"could not be read as a settings object ({exc})")
     return "2026-05-04", "2026-05-12"
-
-
-def _resolve_python_exe() -> str:
-    project_dir = _PROJECT_DIR
-    venv_dir = project_dir / ".venv"
-    if venv_dir.exists():
-        win_py = venv_dir / "Scripts" / "python.exe"
-        if win_py.exists():
-            return str(win_py)
-        unix_py = venv_dir / "bin" / "python3"
-        if unix_py.exists():
-            return str(unix_py)
-    return sys.executable
 
 
 def _get_anthropic_client():
@@ -290,6 +278,18 @@ def get_algo_status(session_id: str) -> dict[str, Any]:
     return out
 
 
+def _echo_child_output(text: str) -> None:
+    """Print the child's output without letting it fail the run.
+
+    It now arrives as real UTF-8 (``✅``). A redirected server stdout on Windows
+    is the ANSI code page with strict errors, so a plain ``print`` raised
+    UnicodeEncodeError and the ``except`` below reported a finished run as
+    failed (#688).
+    """
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    print(text.encode(encoding, "backslashreplace").decode(encoding, "replace"))
+
+
 def _run_backtest_background(
     config_path: Path,
     session_id: str,
@@ -301,12 +301,19 @@ def _run_backtest_background(
     global algo_status
     project_dir = _PROJECT_DIR
     script = project_dir / "scripts" / "backtest_custom_algo.py"
-    python_exe = _resolve_python_exe()
     env = os.environ.copy()
+    # The engine prints emoji (``✅ LLM initialized``); under a Windows ANSI
+    # code page the child's print raises UnicodeEncodeError. Same pair as the
+    # dashboard backtest child (#653): the child writes UTF-8 and the parent
+    # reads it as such (#688).
+    env["PYTHONIOENCODING"] = "utf-8:backslashreplace"
 
     algo_status["progress"] = "Fetching hourly bars from Alpaca…"
 
     try:
+        # Inside the try: a raise before it would skip the finally and leave
+        # the single-flight algo_status claiming "running" until a restart.
+        python_exe = child_python()
         proc = subprocess.run(
             [
                 python_exe,
@@ -321,15 +328,19 @@ def _run_backtest_background(
             cwd=str(project_dir),
             capture_output=True,
             text=True,
+            # Named, not the locale's: on Windows that is the ANSI code page,
+            # which cannot decode the child's UTF-8.
+            encoding="utf-8",
+            errors="replace",
             timeout=3600,
             env=env,
         )
 
         print("=== CUSTOM ALGO BACKTEST ===")
         if proc.stdout:
-            print(proc.stdout)
+            _echo_child_output(proc.stdout)
         if proc.stderr:
-            print(proc.stderr)
+            _echo_child_output(proc.stderr)
 
         result_path = config_path.with_suffix(".result.json")
         if proc.returncode != 0:

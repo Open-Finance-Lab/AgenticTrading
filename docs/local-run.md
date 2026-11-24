@@ -3,7 +3,7 @@
 This guide gets the dashboard, the API and a working backtest running on your
 own machine **with no API keys and no money at risk**, then shows how to run the
 test suites. Every command below was run end to end on Linux (Python 3.13,
-Node 22).
+Node 22). On Windows, see the note at the end of [Install](#2-install).
 
 All commands run from the **repository root**.
 
@@ -53,6 +53,12 @@ If `uv venv` asks *"A virtual environment already exists. Replace it?"*,
 answer **no** unless you mean to reinstall everything. Replacing it deletes
 every installed package.
 
+**On Windows**, the venv's interpreter is `.venv/Scripts/python.exe`, not
+`.venv/bin/python`. Use it in every command in this guide, and run the
+commands from Git Bash, since `run_local_safe.sh` and the `VAR=value command`
+prefixes are Bash. A venv is per OS: one built in WSL does not run on Windows,
+and the reverse. This guide has not yet been run end to end on Windows.
+
 ## 3. Start the app safely
 
 ```bash
@@ -71,6 +77,9 @@ The script:
   reset to seed data. Set `ATL_LOCAL_DIR` to use a different folder.
 - blanks every broker and LLM key (Alpaca, Anthropic, OpenAI, DeepSeek,
   CommonStack, OpenRouter) for the process, even if they are in your shell.
+- blanks the three `*_DATABASE_URL` variables and the mail (`BREVO_API_KEY`),
+  Stripe and iFinD keys, so a `dashboard/.env` configured like prod cannot
+  write to prod Postgres, send real mail or reach a paid gateway.
 - forces `ROBINHOOD_EXECUTE=false`, which turns off the only code path that
   can place a real-money order.
 - turns off the two background jobs that can spend money on their own:
@@ -78,8 +87,8 @@ The script:
 - enables `ENABLE_VNPY_SIMULATION=true`, which adds the simulated data source.
 
 On startup the log prints one `… backend: sqlite (…)` line per store. They
-should all say `sqlite`. A `postgres` line means a `*_DATABASE_URL` variable
-leaked in from your environment.
+should all say `sqlite`. A `postgres` line means the script was edited or
+bypassed and a `*_DATABASE_URL` variable leaked in from your environment.
 
 To run the server by hand instead, the canonical command is
 `uvicorn dashboard.backend.app:app` from the repo root. Never run

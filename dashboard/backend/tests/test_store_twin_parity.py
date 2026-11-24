@@ -275,20 +275,6 @@ _DIALECT_BRANCH_ALLOWLIST: dict[str, str] = {
         "`%s` query in the file would reach sqlite3. None is a missing "
         "extraction: this file *is* the extraction."
     ),
-    "dashboard/backend/domain/analytics/states.py": (
-        "AnalyticsStateStore dialect-branches over the already-twinned "
-        "AnalyticsStore/PostgresAnalyticsStore base_store for the legacy "
-        "user_analytics_snapshots table, not a store of its own -- the "
-        "branched methods also read users (get_user; that table belongs to "
-        "another registered twin, UserStore/PostgresUserStore, so this is a "
-        "cross-domain read, not a missing extraction) and, via "
-        "list_stale_user_ids, analytics_subject_settings and "
-        "user_lifecycle_daily_snapshots. Admin layer redesign PR A/PR B "
-        "(docs/superpowers/specs/2026-09-15-admin-layer-redesign-design.md "
-        "§6.5) deletes the five-state columns and repair path this class "
-        "serves, which removes or shrinks this branch -- tracked there, not "
-        "in PR T."
-    ),
     "dashboard/backend/domain/analytics/rollups.py": (
         "AnalyticsRollupStore dialect-branches over the already-twinned "
         "AnalyticsStore/PostgresAnalyticsStore base_store for "
@@ -305,12 +291,6 @@ _DIALECT_BRANCH_ALLOWLIST: dict[str, str] = {
         "grepping for the service name will not find the branch. Not a store "
         "of its own; that surface is rewritten in admin layer redesign PR A/"
         "PR B (design doc §6.10), which is where this branch is next touched."
-    ),
-    "dashboard/backend/domain/analytics/lifecycle_backfill.py": (
-        "LifecycleBackfillSource dialect-branches over the already-twinned "
-        "analytics_base for the historical 8-week lifecycle reconstruction "
-        "job. Not a store of its own; admin layer redesign PR A's daily job "
-        "and migration (design doc §6.9) replace this reconstruction path."
     ),
 }
 
@@ -513,8 +493,8 @@ _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _NO_OWN_DDL_TWINS: dict[str, str] = {
     "PostgresValueAnalyticsStore": (
         "ValueAnalyticsStore/PostgresValueAnalyticsStore own no CREATE TABLE "
-        "or CREATE INDEX: both read and write user_analytics_snapshots, "
-        "user_lifecycle_daily_snapshots and analytics_projection_jobs "
+        "or CREATE INDEX: both read and write user_daily_facts, "
+        "user_activity, lifecycle_transitions and analytics_projection_jobs "
         "through an injected analytics_base connection, and that base is "
         "AnalyticsStore/PostgresAnalyticsStore -- already a registered pair "
         "above, whose own schema-column test covers those tables."

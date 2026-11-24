@@ -28,16 +28,24 @@ This module is domain-level orchestration: it must NOT import dashboard scripts,
 import json
 import math
 from datetime import date, datetime, timedelta
+from itertools import chain
+from numbers import Real
 from types import MappingProxyType
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import pandas as pd
 
 from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL
 from dashboard.backend.infrastructure.llm.validator import (
     DJIA_30,
+    LLM_ACTION_DEFAULT_CONFIDENCE,
     MAX_ORDER_SHARES,
+    TRADING_ACTIONS,
     create_prompt,
+    normalize_action,
+    normalize_symbol,
+    read_confidence,
+    sell_request,
 )
 from dashboard.backend.domain.trading.portfolio import (
     append_equity_record as _append_equity_record,
@@ -46,6 +54,7 @@ from dashboard.backend.domain.trading.portfolio import (
 )
 from dashboard.backend.domain.trading.execution import (
     execute_actions as _execute_actions,
+    record_refused_order as _record_refused_order,
 )
 from dashboard.backend.domain.backtesting.reference_agent import (
     make_rule_based_decision as _make_rule_based_decision,
@@ -59,6 +68,7 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
 )
 from dashboard.backend.infrastructure.llm.execution.errors import (
     LLMExecutionError,
+    empty_reply_usage,
     is_empty_reply,
     is_transient_provider_failure,
 )
@@ -90,6 +100,29 @@ STRICT_LLM_MAX_FALLBACK_RATIO = 0.02
 # above H6 (1/25 = 4% < 5%); ``test_strict_llm_budget_clears_h6`` pins that.
 STRICT_LLM_MIN_STEPS_FOR_ONE_STRIKE = 25
 
+# The version of the pre-trade gate in ``make_trading_decision_with_llm``,
+# recorded on every LLM run (``agent_runs.metadata.llm_gate_version``). Bump it
+# whenever the gate's rules change what the same reply trades: a cached
+# leaderboard row and a recorded decision tape are only comparable with output
+# from the gate that produced them. Absent on rows written before it existed.
+# 2: a confidence that is not a number from 0 to 1 is not read at all -- it
+#    neither sizes a buy nor decides the 0.3 floor (#674). The first version
+#    recorded, so it also covers what landed just before it: actions read by
+#    ``normalize_action`` (#658) and sells sized as asked (#661, recorded on
+#    its own as ``llm_sell_sizing``).
+# 3: a buy size the model gave but that cannot be carried out (0.6 rounding to
+#    0 shares, -0.5, a bool, an empty list) is skipped and recorded as an
+#    ``invalid_quantity`` rejection; only a missing/null/empty/0 size is sized
+#    from confidence (#675).
+LLM_GATE_VERSION = 3
+
+
+# The order-event reason of an order the gate refused because it cannot read
+# its size (a SELL since #661, a BUY since #675). The same word the
+# conformance reference uses for it.
+ORDER_SIZE_REFUSED_REASON = "invalid_quantity"
+SELL_SIZE_REFUSED_REASON = ORDER_SIZE_REFUSED_REASON
+
 
 # Up to this many symbols a pipeline agent's market snapshot carries the whole
 # universe, trend-ordered. A cut inside a universe this small (DJIA_30, the
@@ -101,6 +134,82 @@ SNAPSHOT_FULL_UNIVERSE_MAX = 30
 # many top-trend names plus current holdings. A pipeline prompt says so
 # (``universe_note``); the single-prompt one lists every VALID SYMBOL instead.
 SNAPSHOT_SHORTLIST_SIZE = 12
+
+# How far back a decision's ``recent_trades`` block looks. The Live board
+# carries this memory across its nightly increments through ``snapshot_state``,
+# so it is also how much trade history a snapshot keeps.
+TRADE_MEMORY_WINDOW = timedelta(hours=24)
+
+# Runaway bound on the trades a snapshot carries (and a restore accepts). Six
+# decisions a session over a 30-name universe is at most 180 trades inside the
+# window, so the window, not this cap, normally decides what is kept.
+SNAPSHOT_TRADE_MEMORY_LIMIT = 200
+
+# Marks a snapshot that carries ``recent_trades``; ``trade_memory_since`` beside
+# it says from which bar the chain of snapshots has carried it (see
+# ``PortfolioManager._trade_memory_since``). The Live month the memory shipped
+# in joins nights that opened with no memory of the night before to nights
+# that opened with it, and these two keys are the record of where.
+TRADE_MEMORY_VERSION = 1
+
+
+def _memory_timestamp(value: Any) -> Optional[pd.Timestamp]:
+    """``value`` as a tz-aware Timestamp, or None when it is not a readable one.
+
+    A naive stamp is read as UTC, the zone the board's bars are stamped in, so
+    a restored trade can always be compared with a tz-aware decision clock
+    (comparing naive with aware raises, and the decision path would swallow
+    that into a rule-based fallback). Text must open with an ISO date:
+    pandas also reads "now" and "today", which would stamp a corrupt row at
+    the wall clock, later than every bar.
+    """
+    if not isinstance(value, (str, datetime)):
+        return None
+    try:
+        if isinstance(value, str):
+            date.fromisoformat(value[:10])
+        ts = pd.Timestamp(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if pd.isna(ts):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    return ts
+
+
+def _memory_trade(trade: Any) -> Optional[Dict[str, Any]]:
+    """The prompt's five fields of one trade, or None for a row it cannot use.
+
+    Snapshotting and restoring both pass through here, so a corrupt row is
+    dropped on either side instead of failing the session it was read in.
+    """
+    if not isinstance(trade, Mapping):
+        return None
+    symbol, side = trade.get("symbol"), trade.get("side")
+    if not (isinstance(symbol, str) and symbol and isinstance(side, str) and side):
+        return None
+    ts = _memory_timestamp(trade.get("timestamp"))
+    if ts is None:
+        return None
+    # Numbers only: the writer stores floats, so text or a bool (which
+    # float() reads as 1.0) is a corrupt row, not a quantity.
+    numbers = (trade.get("shares"), trade.get("price"))
+    if not all(isinstance(n, Real) and not isinstance(n, bool) for n in numbers):
+        return None
+    try:
+        shares, price = (float(n) for n in numbers)
+    except OverflowError:  # an int too large for a float, e.g. 10**400
+        return None
+    if not (math.isfinite(shares) and math.isfinite(price)):
+        return None
+    return {
+        "symbol": symbol,
+        "side": side,
+        "shares": shares,
+        "price": price,
+        "timestamp": ts,
+    }
 
 
 def _universe_note(*, ranked: int, held: int, universe_size: int) -> str:
@@ -158,6 +267,17 @@ class PortfolioManager:
         self.positions = {}  # {symbol: num_shares}
         self.entry_prices = {}  # {symbol: entry_price}
         self.trades = []
+        # Trades from earlier sessions, restored from a snapshot only so the
+        # prompt's 24h ``recent_trades`` block can see them. Never merged into
+        # ``trades``: LLMAgentStrategy copies ``trades`` into its trade count and
+        # the Live board folds that copy into the month's trade stats on every
+        # checkpoint (live.py ``_write_live_checkpoint``), so a restored trade
+        # there would be counted again on every later night.
+        self.restored_trades: List[Dict[str, Any]] = []
+        # The bar this chain of snapshots began carrying trade memory from,
+        # restored from a snapshot that records it. None means the chain
+        # begins with this manager (``_trade_memory_since``).
+        self.trade_memory_since: Optional[pd.Timestamp] = None
         self.order_events = []
         # {(symbol, side, reason, trading_date): record} — the same
         # bounded-by-construction shape as t1_deferrals below, pointing at the
@@ -187,6 +307,15 @@ class PortfolioManager:
         # Real LLM token usage (server-side calls report actual counts)
         self.llm_calls = 0        # billed API calls (any response with usage)
         self.llm_decisions = 0    # steps the model actually drove (H6 coverage)
+        # Actions whose confidence was not a number from 0 to 1; of those, the
+        # buys skipped because they had no size of their own to trade at; and
+        # the steps that lost at least one such buy. A model answering on a
+        # 0-100 scale on every bar shows up here, not as a quiet flat curve:
+        # the leaderboard's H6 guard subtracts the steps from its numerator.
+        self.unusable_confidence_actions = 0
+        self.unusable_confidence_skipped = 0
+        self.confidence_skipped_steps = 0
+        self._unusable_confidence_reported = False
         self.input_tokens = 0
         self.output_tokens = 0
         # Strict-LLM tolerance. The runner sets ``strict_llm_total_steps`` once
@@ -199,11 +328,16 @@ class PortfolioManager:
         self.last_pipeline_step_outputs = []
         # Tradeable universe for this run (defaults to DJIA_30).
         symbols = allowed_symbols if allowed_symbols is not None else DJIA_30
-        self.allowed_symbols = [str(s).strip().upper() for s in symbols if s]
+        self.allowed_symbols = [normalize_symbol(str(s)) for s in symbols if s]
         self._allowed_set = set(self.allowed_symbols)
 
     def snapshot_state(self) -> Dict[str, Any]:
-        """JSON-safe book for resuming a later session (Live daily increment)."""
+        """JSON-safe book for resuming a later session (Live daily increment).
+
+        Carries cash, positions, T+1 lots and ``recent_trades``: the trade
+        memory the next session's prompts read (see ``_trade_memory_tail``),
+        marked by ``trade_memory`` and ``trade_memory_since``.
+        """
 
         def _lot(lot: Dict) -> Dict[str, Any]:
             buy = lot.get("buy_date")
@@ -234,10 +368,80 @@ class PortfolioManager:
                 for symbol, lots in (self.frozen_lots or {}).items()
             },
             "t_plus_one_enabled": bool(self.t_plus_one_enabled),
+            "recent_trades": self._trade_memory_tail(),
+            "trade_memory": TRADE_MEMORY_VERSION,
+            "trade_memory_since": self._trade_memory_since(),
         }
 
+    def _trade_memory_tail(self) -> List[Dict[str, Any]]:
+        """Restored and own trades a later prompt can still be shown, JSON-safe.
+
+        Every later decision is at or after the newest trade and after this
+        manager's last bar, so a trade a full ``TRADE_MEMORY_WINDOW`` older than
+        the later of the two can never pass a later decision's cutoff: the tail
+        anchored there is a superset of what any later ``recent_trades`` block
+        reads, and a model that stops trading lets its memory expire instead of
+        carrying its last trades in every later snapshot. Oldest first, at most
+        ``SNAPSHOT_TRADE_MEMORY_LIMIT`` (the newest), timestamps as ISO text.
+        """
+        source = list(chain(self.restored_trades, self.trades))
+        rows = [row for row in map(_memory_trade, source) if row is not None]
+        if len(rows) < len(source):
+            # Restored rows were read through _memory_trade and the executor
+            # writes whole trades, so a row dropped here is a changed trade
+            # shape: this session's prompts saw it, the next session's won't.
+            print(
+                f"ERROR: portfolio.trade_memory_unwritable trades={len(source)} "
+                f"kept={len(rows)}",
+                flush=True,
+            )
+        if not rows:
+            return []
+        rows.sort(key=lambda row: row["timestamp"])
+        anchor = rows[-1]["timestamp"]
+        last_bar = self._bar_stamp(-1)
+        if last_bar is not None and last_bar > anchor:
+            anchor = last_bar
+        cutoff = anchor - TRADE_MEMORY_WINDOW
+        tail = [row for row in rows if row["timestamp"] > cutoff]
+        return [
+            {**row, "timestamp": row["timestamp"].isoformat()}
+            for row in tail[-SNAPSHOT_TRADE_MEMORY_LIMIT:]
+        ]
+
+    def _trade_memory_since(self) -> Optional[str]:
+        """The bar from which this chain of snapshots has carried trade memory,
+        as ISO text, or None before this manager has decided anything.
+
+        Restored from a snapshot that records it; otherwise this manager's
+        first bar, because a manager that restored no memory is where the
+        memory starts. A session dated after the stamp opened with the previous
+        session's trades in its prompt; the session it falls in did not, unless
+        it was the month's first and had nothing to remember. The Live board
+        deletes every superseded checkpoint, so its newest row is the only one
+        left to say whether its month joined the two, and a bare version flag
+        could not say where.
+        """
+        since = self.trade_memory_since
+        if since is None:
+            since = self._bar_stamp(0)
+        return since.isoformat() if since is not None else None
+
+    def _bar_stamp(self, index: int) -> Optional[pd.Timestamp]:
+        """The stamp of equity point ``index`` (0 is the first bar this manager
+        decided, -1 the last), or None before it has decided anything."""
+        if not self.equity_history:
+            return None
+        return _memory_timestamp(self.equity_history[index].get("timestamp"))
+
     def restore_state(self, snapshot: Optional[Dict[str, Any]]) -> None:
-        """Load cash/positions/T+1 lots from ``snapshot_state`` (no-op if empty)."""
+        """Load cash/positions/T+1 lots and the 24h trade memory from
+        ``snapshot_state`` (no-op if empty).
+
+        The memory goes to ``restored_trades``, never ``trades``. A snapshot
+        written before it existed restores none, quietly; a marked one that
+        does not read back whole logs an ERROR (``_restore_trade_memory``).
+        """
         if not snapshot:
             return
         self.cash = float(snapshot.get("cash", self.cash))
@@ -280,6 +484,59 @@ class PortfolioManager:
             if restored:
                 lots_out[str(symbol)] = restored
         self.frozen_lots = lots_out
+        self._restore_trade_memory(snapshot)
+
+    def _restore_trade_memory(self, snapshot: Dict[str, Any]) -> None:
+        """Load ``recent_trades`` into ``restored_trades`` and, from a snapshot
+        that carried it whole, ``trade_memory_since``.
+
+        Rows are re-read through ``_memory_trade``, put in time order and capped
+        to the newest ``SNAPSHOT_TRADE_MEMORY_LIMIT``; an unusable one is
+        skipped rather than allowed to fail the session.
+        """
+        memory = snapshot.get("recent_trades")
+        parsed = sorted(
+            (
+                row
+                for row in map(_memory_trade, memory if isinstance(memory, list) else [])
+                if row is not None
+            ),
+            key=lambda row: row["timestamp"],
+        )
+        self.restored_trades = parsed[-SNAPSHOT_TRADE_MEMORY_LIMIT:]
+        version = snapshot.get("trade_memory")
+        if version is None:
+            # Written before the memory existed: nothing was carried, nothing
+            # is wrong, and the mark restarts at this manager's first bar.
+            self.trade_memory_since = None
+            return
+        since = _memory_timestamp(snapshot.get("trade_memory_since"))
+        # A marked snapshot holds only rows ``_memory_trade`` accepted and, being
+        # written after a bar, a readable stamp. Less than that is a broken
+        # contract (a renamed key, a changed row shape, a version this code does
+        # not know), not a quiet night: nothing else would tell the two apart,
+        # since the night just opens with less memory than it was given.
+        intact = (
+            version == TRADE_MEMORY_VERSION
+            and isinstance(memory, list)
+            and len(parsed) == len(memory)
+            and since is not None
+        )
+        if not intact:
+            if isinstance(memory, list):
+                found = len(memory)
+            else:
+                found = "missing" if memory is None else type(memory).__name__
+            print(
+                f"ERROR: portfolio.trade_memory_unreadable version={version} "
+                f"recent_trades={found} restored={len(parsed)} "
+                f"since={'ok' if since is not None else 'unreadable'}",
+                flush=True,
+            )
+        # Lost or unreadable: the mark restarts at this manager's first bar,
+        # which can only record the switch later than it happened, never
+        # earlier.
+        self.trade_memory_since = since if intact else None
 
     @property
     def sellable_positions(self) -> Optional[Mapping]:
@@ -304,6 +561,82 @@ class PortfolioManager:
         if not self.t_plus_one_enabled:
             return held
         return min(self.available_positions.get(symbol, 0), held)
+
+    def _read_buy_size(
+        self, raw: Any
+    ) -> Tuple[float, Optional[str], float]:
+        """A model's buy ``position_size`` as ``(shares, refusal, asked)``.
+
+        The one reading of a buy's size, shared by the strict pre-check, the
+        unreadable-confidence skip and the buy branch, so they cannot disagree
+        about what "no size" means. ``(0, None, 0.0)`` is "no size": a missing,
+        null, empty or zero size, which the gate sizes from confidence. A
+        refusal names why a size given cannot be carried out, and ``asked`` is
+        the ledger's requested count (finite, never negative):
+
+        - unparseable: a bool (``int(True)`` is 1, not a share count), an
+          empty list or dict, text ``int()`` cannot read (#663), NaN or
+          infinity;
+        - rounds to 0 shares: 0.6 truncates to 0 on whole-share markets;
+        - not positive: -0.5, -3.
+
+        Whether a size was given is read off the raw value, never the
+        coerced one: ``int()`` also turns 0.6 and -0.5 into 0, and those
+        must not be sized from confidence as though the model left the size
+        out. Whole shares unless the market trades in lots, where the
+        executor validates the quantity itself (so 0.6 reaches its lot check).
+        """
+        if isinstance(raw, bool):
+            return 0, f"unparseable position_size {raw!r}", 0.0
+        try:
+            asked = float(raw) if raw is not None and raw != "" else 0.0
+            shares = asked if self.lot_size > 1 else int(raw or 0)
+        except (TypeError, ValueError, OverflowError):
+            return 0, f"unparseable position_size {raw!r}", 0.0
+        if not math.isfinite(asked):
+            return 0, f"unparseable position_size {raw!r}", 0.0
+        if asked == 0:
+            return 0, None, 0.0
+        if shares <= 0:
+            if asked > 0:
+                return 0, f"position_size {raw!r} rounds to 0 shares", asked
+            return 0, f"invalid position_size {raw!r}, not positive", 0.0
+        return shares, None, asked
+
+    def _refuse_order(
+        self,
+        *,
+        action: str,
+        symbol: str,
+        requested_shares: float,
+        timestamp: Any,
+        price: float,
+        strategy_reason: str,
+    ) -> None:
+        """Record an order the gate skipped because it cannot read its size.
+
+        On the order ledger, like an executor rejection: a skip that is only a
+        ``print`` is invisible from a dashboard backtest, whose stdout nobody
+        reads. A run whose model wrote ``"all"`` for a sell, or 0.6 for every
+        buy, would publish a curve that never traded with nothing to say why.
+        """
+        _record_refused_order(
+            rejected_orders=self.rejected_orders,
+            order_events=self.order_events,
+            order_event_repeats=self._order_event_repeats,
+            timestamp=timestamp,
+            symbol=symbol,
+            action=action,
+            # Finite and never negative, as every ledger field must be ("all",
+            # NaN or -3 asked for no count, and the reason says the size was
+            # refused); for a refused sell trim the part it asked for, and
+            # for a buy under one share the fraction asked for.
+            requested_shares=requested_shares,
+            price=price,
+            reason=ORDER_SIZE_REFUSED_REASON,
+            strategy_reason=strategy_reason,
+            costs_enabled=self.transaction_cost_profile is not None,
+        )
 
     def record_t1_deferral(
         self,
@@ -454,8 +787,10 @@ class PortfolioManager:
             # Extract recent trade history (last 24 hours) for LLM memory
             # This prevents LLM from re-entering stocks too soon
             recent_trades = []
-            cutoff_time = timestamp - timedelta(hours=24)
-            for trade in self.trades:
+            cutoff_time = timestamp - TRADE_MEMORY_WINDOW
+            # Restored memory first: it is older than anything this manager
+            # has traded itself, so the block stays in time order.
+            for trade in chain(self.restored_trades, self.trades):
                 if trade["timestamp"] > cutoff_time:
                     recent_trades.append({
                         "symbol": trade["symbol"],
@@ -737,6 +1072,7 @@ class PortfolioManager:
                         llm_response = _extract_response_text(response)
                         break
                     except (LLMExecutionError, AttributeError) as unusable:
+                        self._record_empty_reply_usage(unusable)
                         legacy_empty = _is_legacy_empty_reply(unusable)
                         if rescue or not (legacy_empty or is_empty_reply(unusable)):
                             raise
@@ -748,9 +1084,9 @@ class PortfolioManager:
                             attempt += 1
                         else:
                             # The execution layer rejects an empty reply itself
-                            # (#600) and releases its reservation at zero
-                            # (#556), so a same-ceiling retry is a generation
-                            # the platform pays for and never bills. It goes
+                            # (#600) and settles what it was billed (#556), so
+                            # a same-ceiling retry is another billed generation
+                            # likely to spend the same ceiling again. It goes
                             # straight to the rescue, as pipeline_runner's
                             # steps do. Any other execution error -- a request
                             # or result contract break, billing, credentials,
@@ -787,6 +1123,7 @@ class PortfolioManager:
                             # truncated first one: keep the first attempt.
                             if not is_empty_reply(retry_err):
                                 raise
+                            self._record_empty_reply_usage(retry_err)
                             retry_response = None
                         if retry_response is not None:
                             self._record_llm_usage(retry_response)
@@ -847,36 +1184,90 @@ class PortfolioManager:
                 llm_actions = llm_actions[:max_actions]
 
             if strict_llm:
-                valid_action_types = {"buy", "sell", "hold"}
                 for llm_action in llm_actions:
                     if not isinstance(llm_action, dict):
                         raise LLMDecisionError(
                             "LLM returned an invalid action batch"
                         )
-                    symbol = str(llm_action.get("symbol") or "").strip().upper()
-                    action_type = str(
-                        llm_action.get("action") or ""
-                    ).strip().lower()
+                    symbol = normalize_symbol(str(llm_action.get("symbol") or ""))
+                    # A missing action is refused here, unlike the loop below.
+                    action_type = normalize_action(llm_action.get("action"))
                     if (
                         symbol not in self._allowed_set
-                        or action_type not in valid_action_types
+                        or action_type not in TRADING_ACTIONS
                     ):
                         raise LLMDecisionError(
                             "LLM returned an invalid action batch"
                         )
+                    # The one order the gate cannot carry out as written: a
+                    # buy sized from a confidence that is not a 0-1 number.
+                    # Rejected like a bad symbol rather than skipped, so a
+                    # billed run whose model answers 0-100 stops on the first
+                    # bar instead of charging for a run that never buys.
+                    if (
+                        action_type == "buy"
+                        and read_confidence(
+                            llm_action.get("confidence"),
+                            LLM_ACTION_DEFAULT_CONFIDENCE,
+                        )
+                        is None
+                        # (0 shares, no refusal) is "no size" (_read_buy_size).
+                        and self._read_buy_size(
+                            llm_action.get("position_size", 0)
+                        )[:2]
+                        == (0, None)
+                    ):
+                        raise LLMDecisionError(
+                            "LLM returned a buy with no size and a confidence "
+                            "that is not a number from 0 to 1"
+                        )
 
+            skipped_for_confidence = False
+            # Whether any action named buy, sell or hold. A batch where none
+            # did carried no decision the model can be credited with (#658).
+            recognised_any = False
             for llm_action in llm_actions:
-                symbol = str(llm_action.get("symbol") or "").strip().upper()
-                action_type = llm_action.get("action", "hold").lower()
-                confidence = llm_action.get("confidence", 0.5)
-                reasoning = llm_action.get("reasoning", "")
-                
-                print(f"\n   Processing: {symbol} ({action_type.upper()}, conf={confidence:.0%})")
+                symbol = normalize_symbol(str(llm_action.get("symbol") or ""))
+                # Read by the same rule as the strict check above: two readings
+                # let "buy " pass that check and then match no branch (#658).
+                # A missing or null action holds, as an absent one always has.
+                raw_action = llm_action.get("action")
+                action_type = normalize_action(raw_action) or "hold"
+                raw_confidence = llm_action.get("confidence")
+                confidence = read_confidence(
+                    raw_confidence, LLM_ACTION_DEFAULT_CONFIDENCE
+                )
+                raw_reasoning = llm_action.get("reasoning")
+                reasoning = "" if raw_reasoning is None else str(raw_reasoning)
+
+                if action_type not in TRADING_ACTIONS:
+                    # Only a non-strict run gets here; strict_llm refused the
+                    # batch above. Placing nothing silently read as a hold.
+                    print(f"\n   ⚠️  {symbol}: Skip (unrecognised action {raw_action!r})")
+                    continue
+                recognised_any = True
+
+                # A confidence that is not a number from 0 to 1 (25, NaN,
+                # "high", a bool) is not read at all: no scale is guessed and
+                # no default is put over it. It therefore cannot decide the
+                # 0.3 floor either way, so an order that does not need it is
+                # carried out as the model wrote it -- a sell (sized by
+                # sell_request) or a buy with its own position_size. Only
+                # a buy that would be sized from it is skipped, below: that is
+                # where a 0-100 answer used to multiply the order by 100.
+                if confidence is None:
+                    conf_label = "unread"
+                    self._note_unusable_confidence()
+                    print(f"\n   Processing: {symbol} ({action_type.upper()}, conf={raw_confidence!r:.40})")
+                    print(f"      ⚠️  {symbol}: confidence {raw_confidence!r:.40} is not a number from 0 to 1; not read")
+                else:
+                    conf_label = f"{confidence:.0%}"
+                    print(f"\n   Processing: {symbol} ({action_type.upper()}, conf={conf_label})")
                 print(f"      Reasoning: {reasoning[:60]}...")
-                
+
                 # Skip low-confidence decisions
-                if confidence < 0.3:
-                    print(f"      ⏸️  Skipping (confidence {confidence:.0%} too low)")
+                if confidence is not None and confidence < 0.3:
+                    print(f"      ⏸️  Skipping (confidence {conf_label} too low)")
                     continue
                 
                 if symbol not in self._allowed_set:
@@ -887,22 +1278,29 @@ class PortfolioManager:
                 price = float(signal.get("price", 0)) if signal.get("price") else 0.0
                 
                 if action_type == "buy":
-                    # Use position_size from LLM directly. Coerce defensively:
-                    # json.loads happily yields strings, floats, Infinity and
-                    # NaN here, and an unparseable value must skip THIS action,
-                    # not throw the whole decision into the rule-based fallback.
+                    # Use position_size from LLM directly, read defensively
+                    # (``_read_buy_size``): a size it cannot carry out skips
+                    # THIS action and is recorded, never confidence-sized.
                     raw_size = llm_action.get("position_size", 0)
-                    try:
-                        shares = (
-                            float(raw_size or 0)
-                            if self.lot_size > 1
-                            else int(raw_size or 0)
+                    shares, refusal, asked = self._read_buy_size(raw_size)
+                    if refusal is not None:
+                        print(f"      ⚠️  BUY {symbol}: Skip ({refusal})")
+                        self._refuse_order(
+                            action="buy",
+                            symbol=symbol,
+                            requested_shares=asked,
+                            timestamp=timestamp,
+                            price=price,
+                            strategy_reason=f"[LLM] {reasoning} (confidence: {conf_label})",
                         )
-                    except (TypeError, ValueError, OverflowError):
-                        print(f"      ⚠️  BUY {symbol}: Skip (unparseable position_size {raw_size!r})")
                         continue
-                    if isinstance(shares, float) and not math.isfinite(shares):
-                        print(f"      ⚠️  BUY {symbol}: Skip (unparseable position_size {raw_size!r})")
+
+                    if shares == 0 and confidence is None:
+                        # Nothing to size it from (see above). A strict run
+                        # rejected this order before the loop.
+                        self.unusable_confidence_skipped += 1
+                        skipped_for_confidence = True
+                        print(f"      ⚠️  BUY {symbol}: Skip (no position_size, and no 0-1 confidence to size it from)")
                         continue
 
                     # If LLM didn't provide position_size, calculate from confidence
@@ -943,42 +1341,76 @@ class PortfolioManager:
                             "symbol": symbol,
                             "action": "buy",
                             "shares": shares,
-                            "reason": f"[LLM] {reasoning} (confidence: {confidence:.0%})",
+                            "reason": f"[LLM] {reasoning} (confidence: {conf_label})",
                             "confidence": confidence
                         })
-                        print(f"      ✅ BUY {symbol}: {shares} shares @ ${price:.2f} (conf: {confidence:.0%})")
+                        print(f"      ✅ BUY {symbol}: {shares} shares @ ${price:.2f} (conf: {conf_label})")
                     else:
                         print(f"      ⚠️  BUY {symbol}: Skip (insufficient cash: need ${shares*price:,.0f}, have ${self.cash:,.0f})")
                 
                 elif action_type == "sell":
+                    held = self.positions.get(symbol, 0)
+                    if held <= 0:
+                        print(f"      ⚠️  SELL {symbol}: Skip (not in portfolio, only owns: {list(self.positions.keys())})")
+                        continue
+                    # Sell what was asked for (#661): position_size shares,
+                    # else a size_fraction of the position (what a pipeline
+                    # risk action sends), else the whole position. A size that
+                    # cannot be read skips THIS action and is recorded; it is
+                    # never read as "all of it" (sell_request).
+                    reason = f"[LLM] {reasoning} (confidence: {conf_label})"
+                    requested, refusal, asked = sell_request(
+                        llm_action.get("position_size"),
+                        llm_action.get("size_fraction"),
+                        held,
+                        lot_size=self.lot_size,
+                    )
+                    if refusal is not None:
+                        print(f"      ⚠️  SELL {symbol}: Skip ({refusal})")
+                        self._refuse_order(
+                            action="sell",
+                            symbol=symbol,
+                            requested_shares=asked,
+                            timestamp=timestamp,
+                            price=price,
+                            strategy_reason=reason,
+                        )
+                        continue
                     # Size at the sellable quantity, not the held one: under T+1
                     # they differ, and the difference is unfillable.
-                    held = self.positions.get(symbol, 0)
                     sellable = self.sellable_shares(symbol)
-                    if sellable < held:
-                        self.record_t1_deferral(symbol, held, sellable)
-                    if sellable > 0:
+                    wanted = min(requested, held)
+                    if sellable < wanted:
+                        self.record_t1_deferral(symbol, wanted, sellable)
+                    shares = min(wanted, sellable)
+                    if shares > 0:
                         action = {
                             "symbol": symbol,
                             "action": "sell",
-                            "shares": sellable,
-                            "reason": f"[LLM] {reasoning} (confidence: {confidence:.0%})",
+                            "shares": shares,
+                            "reason": reason,
                             "confidence": confidence
                         }
-                        if sellable < held:
+                        if shares < requested:
                             # The reason string still carries the model's own
                             # words ("exit the full position"); without this the
-                            # log would read as though it asked for `sellable`.
-                            action["requested_shares"] = held
+                            # log would read as though it asked for `shares`.
+                            action["requested_shares"] = requested
                         actions.append(action)
-                        print(f"      ✅ SELL {symbol}: {sellable} shares @ ${price:.2f} (conf: {confidence:.0%})")
-                    elif symbol in self.positions and self.positions[symbol] > 0:
-                        print(f"      ⚠️  SELL {symbol}: Skip (T+1 frozen, {self.positions[symbol]} shares settle next trading day)")
+                        print(f"      ✅ SELL {symbol}: {shares} shares @ ${price:.2f} (conf: {conf_label})")
                     else:
-                        print(f"      ⚠️  SELL {symbol}: Skip (not in portfolio, only owns: {list(self.positions.keys())})")
+                        print(f"      ⚠️  SELL {symbol}: Skip (T+1 frozen, {held} shares settle next trading day)")
                 
                 # else: HOLD is implicit (don't add to actions)
-            
+
+            if not recognised_any:
+                # Like an unparseable reply on this non-strict path: no actions
+                # and no H6 credit, since nothing the model sent named a trade
+                # or a hold. Counting it published a curve the model never
+                # drove under its name (#658).
+                print("   ⚠️  No action named buy, sell or hold; holding this step\n")
+                return {"actions": []}
+
             # H6 coverage increment #2 of 2 — the main success exit: the model's
             # actions were parsed AND processed without error, so the returned
             # decision is genuinely the model's. This is the H6 coverage
@@ -986,12 +1418,24 @@ class PortfolioManager:
             # the processing loop above is caught below and swapped for a
             # rule-based decision, which must NOT count. (Actions filtered for
             # low confidence / invalid symbol still count: the model drove the
-            # step, our policy merely declined to act on it.)
+            # step, our policy merely declined to act on it. A batch in which
+            # no action was recognised returned above without counting.)
+            #
+            # An unsized buy skipped for a confidence that is not a 0-1 number
+            # still counts here too -- no rule-based trade replaced it, and the
+            # decision tape reads an unchanged llm_decisions as a fallback bar
+            # (``decision_tape.driver_for``). It is the model's broken contract,
+            # not our policy, so the step is counted a second time in
+            # confidence_skipped_steps, which the leaderboard's H6 guard
+            # subtracts: a model that answers 0-100 on every bar must not
+            # publish a flat curve at 100% coverage.
             #
             # These two sites are the ONLY writes to llm_decisions. Adding a
             # third means re-checking that the step really was model-driven with
             # no rule-based fallback — that invariant is what the leaderboard's
             # H6 guard rests on.
+            if skipped_for_confidence:
+                self.confidence_skipped_steps += 1
             self.llm_decisions += 1
             print(f"   ✅ Total actions: {len(actions)}\n")
             return {"actions": actions}
@@ -1020,6 +1464,26 @@ class PortfolioManager:
             print(f"   Falling back to rule-based logic\n")
             return self.make_trading_decision(portfolio_state)
 
+    def _note_unusable_confidence(self) -> None:
+        """Count one action whose confidence is not a 0-1 number.
+
+        The first one of a run also prints a flushed ``ERROR: llm.`` line,
+        which a dashboard backtest's parent relays to the service log as it
+        arrives: the per-action lines go to a subprocess's stdout, and a model
+        that answers 0-100 on every bar is a whole-run contract break that a
+        per-item line cannot report. Fixed tokens only -- the raw value is the
+        model's text, and the parent's redaction expects none in this line.
+        """
+        self.unusable_confidence_actions += 1
+        if self._unusable_confidence_reported:
+            return
+        self._unusable_confidence_reported = True
+        print(
+            "ERROR: llm.unusable_confidence "
+            "detail=not_a_number_from_0_to_1 policy=unsized_buys_skipped",
+            flush=True,
+        )
+
     def _record_llm_usage(self, response) -> int:
         """Bill one received response; returns its output-token delta.
 
@@ -1035,6 +1499,19 @@ class PortfolioManager:
         self.output_tokens += output_delta
         self.llm_calls += 1
         return output_delta
+
+    def _record_empty_reply_usage(self, error: BaseException) -> None:
+        """Bill an empty reply the provider charged for (#556); else a no-op.
+
+        It raised instead of coming back, but it is a billed call with usage,
+        so it counts in ``llm_calls`` and the token totals like any response.
+        """
+        billed = empty_reply_usage(error)
+        if billed is None:
+            return
+        self.input_tokens += billed.input_tokens
+        self.output_tokens += billed.output_tokens
+        self.llm_calls += 1
 
     def strict_llm_fallback_budget(self) -> int:
         """How many unusable model responses this strict run may absorb."""

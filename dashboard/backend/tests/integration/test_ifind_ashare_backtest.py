@@ -472,7 +472,12 @@ def test_ifind_llm_request_reaches_engine_database_and_chart_without_fallback(
 
         def wait(self, timeout=None):
             monkeypatch.setattr(sys, "argv", [str(self._command[1]), *self._command[2:]])
-            monkeypatch.setattr(sys, "stdin", io.StringIO(self.stdin.value))
+            # A real child's stdin is text over a byte buffer, and the worker
+            # reads the buffer; a StringIO has none.
+            stdin = io.TextIOWrapper(
+                io.BytesIO(self.stdin.value.encode("utf-8")), encoding="utf-8"
+            )
+            monkeypatch.setattr(sys, "stdin", stdin)
             backtest_hourly_agent.main()
             return super().wait(timeout)
 

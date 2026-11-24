@@ -548,8 +548,8 @@ def test_a_hosted_run_names_its_own_runtime_in_the_model_field():
             "ta": {"agent": _agent("tradingagents")},
         }
     )
-    assert out["ahf"]["readonlyText"] == "AI Hedge Fund — hosted runtime"
-    assert out["ta"]["readonlyText"] == "TradingAgents — hosted runtime"
+    assert out["ahf"]["readonlyText"] == "AI Hedge Fund — hosted runtime, billed to your ATL Credits"
+    assert out["ta"]["readonlyText"] == "TradingAgents — hosted runtime, billed to your ATL Credits"
     for result in out.values():
         # The picker is replaced by the read-only line, and billing is hidden:
         # a hosted run has no model or lane to choose.

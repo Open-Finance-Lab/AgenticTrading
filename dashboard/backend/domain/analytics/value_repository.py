@@ -7,18 +7,20 @@ SQLite twin. The PostgreSQL twin is ``value_repository_postgres.py``
 (``PostgresValueAnalyticsStore``); ``build_value_analytics_store()`` below
 selects between them the same way ``repository.py``'s ``_build_analytics_store()``
 selects between ``AnalyticsStore`` and ``PostgresAnalyticsStore``. Every method
-that reads or writes this store's own tables (``user_analytics_snapshots``,
-``user_lifecycle_daily_snapshots``, ``analytics_projection_jobs``) has exactly
-one code path here; the two methods that branch on a *different* store's
-dialect (``list_commercial_values``, ``list_credit_activity``, both reading
-``self.credits_base``) are unchanged and identical on both twins, because that
-branch was never about which twin this class is -- a caller can pair either
-``analytics_base`` with either ``credits_base``, and both twins must handle it.
+that reads or writes this store's own tables (``user_daily_facts``,
+``user_activity``, ``lifecycle_transitions``, ``analytics_projection_jobs``)
+has exactly one code path here; the two methods that branch on a *different*
+store's dialect (``list_commercial_values``, ``list_credit_activity``, both
+reading ``self.credits_base``) are unchanged and identical on both twins,
+because that branch was never about which twin this class is -- a caller can
+pair either ``analytics_base`` with either ``credits_base``, and both twins
+must handle it.
 """
 
 from __future__ import annotations
 
-import json
+import sqlite3
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal, Mapping, Sequence
 
@@ -42,9 +44,111 @@ RUN_SAFE_DEADLINE = timedelta(minutes=60)
 LIFECYCLE_SEGMENTS = frozenset(
     {"new", "onboarding", "growing", "core", "at_risk", "dormant"}
 )
-LIFECYCLE_ROLLUP_METRICS = frozenset(
-    {"lifecycle_segment_count", "lifecycle_transition"}
+# Long-term families written before user-keyed rows expire (design SS6.7):
+# metric_name names the dimension, user_state carries its value.
+_DIMENSION_FAMILIES = frozenset(
+    {
+        "runs_by_tier",
+        "runs_by_user_group",
+        "operator_cost_by_tier",
+        "operator_cost_by_user_group",
+        "own_spend_by_tier",
+        "own_spend_by_user_group",
+    }
 )
+LIFECYCLE_ROLLUP_METRICS = (
+    frozenset({"lifecycle_segment_count", "lifecycle_transition"})
+    | _DIMENSION_FAMILIES
+)
+_ROLLUP_COLUMNS = (
+    "rollup_date",
+    "metric_name",
+    "event_name",
+    "billing_mode",
+    "provider_id",
+    "model_id",
+    "outcome",
+    "error_category",
+    "user_state",
+    "value_count",
+    "value_sum_micro",
+    "updated_at",
+)
+
+
+def _lifecycle_rollup_payloads(
+    day: date, rows: Sequence[Any], *, replace_transitions: bool
+) -> list[tuple]:
+    """Validate lifecycle-owned rollup rows and flatten them for INSERT.
+
+    Shared by both twins: the rules are dialect-free, and a rule fixed on one
+    copy only would be a Postgres-only behaviour divergence.
+    """
+
+    payloads = []
+    for row in rows:
+        if row.rollup_date != day or row.metric_name not in LIFECYCLE_ROLLUP_METRICS:
+            raise ValueError("invalid lifecycle rollup row")
+        if row.metric_name == "lifecycle_segment_count":
+            valid_dimensions = (
+                not row.event_name and row.user_state in LIFECYCLE_SEGMENTS
+            )
+            valid_sum = row.value_sum_micro == 0
+        elif row.metric_name == "lifecycle_transition":
+            valid_dimensions = (
+                replace_transitions
+                and row.event_name in LIFECYCLE_SEGMENTS
+                and row.user_state in LIFECYCLE_SEGMENTS
+                and row.event_name != row.user_state
+            )
+            valid_sum = row.value_sum_micro == 0
+        else:
+            # A long-term dimension family: user_state is the tier or group
+            # value. Only the cost families carry a sum; the runs families
+            # carry a count alone.
+            valid_dimensions = not row.event_name and bool(row.user_state)
+            valid_sum = (
+                row.value_sum_micro == 0
+                if row.metric_name.startswith("runs_by_")
+                else row.value_sum_micro >= 0
+            )
+        unused_dimensions = (
+            row.billing_mode,
+            row.provider_id,
+            row.model_id,
+            row.error_category,
+        )
+        if (
+            not valid_dimensions
+            or any(unused_dimensions)
+            or row.outcome not in {"complete", "partial"}
+            or not valid_sum
+        ):
+            raise ValueError("invalid lifecycle rollup dimensions")
+        payloads.append(
+            (
+                row.rollup_date.isoformat(),
+                row.metric_name,
+                row.event_name,
+                row.billing_mode,
+                row.provider_id,
+                row.model_id,
+                row.outcome,
+                row.error_category,
+                row.user_state,
+                row.value_count,
+                row.value_sum_micro,
+                utc_iso(row.updated_at),
+            )
+        )
+    return payloads
+
+
+def _replaced_lifecycle_metrics(*, replace_transitions: bool) -> list[str]:
+    return sorted(
+        LIFECYCLE_ROLLUP_METRICS
+        - (set() if replace_transitions else {"lifecycle_transition"})
+    )
 _ACTIVE_RUN_STATUSES = frozenset({"created", "loading", "running"})
 _TERMINAL_RUN_STATUSES = frozenset(
     {"completed", "failed", "cancelled", "closed", "timed_out"}
@@ -86,47 +190,6 @@ def _optional_timestamp(value: object) -> datetime | None:
         return _timestamp(value)
     except (TypeError, ValueError):
         return None
-
-
-class UserValueSnapshot(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    user_id: int = Field(gt=0)
-    lifecycle_segment: LifecycleSegment
-    lifecycle_reason_code: str = Field(min_length=1, max_length=100)
-    lifecycle_reason: str = Field(min_length=1, max_length=500)
-    lifecycle_evidence: Sequence[str] = Field(default_factory=tuple, max_length=10)
-    operational_state: OperationalState
-    operational_reason_code: str = Field(min_length=1, max_length=100)
-    operational_reason: str = Field(min_length=1, max_length=500)
-    operational_evidence: Sequence[str] = Field(default_factory=tuple, max_length=10)
-    activated_at: datetime | None = None
-    last_meaningful_activity_at: datetime | None = None
-    inactive_days: int = Field(ge=0)
-    active_days_30d: int = Field(ge=0, le=30)
-    successful_backtests_30d: int = Field(ge=0)
-    calculated_at: datetime
-
-    @field_validator("activated_at", "last_meaningful_activity_at", "calculated_at")
-    @classmethod
-    def require_timezone(cls, value: datetime | None) -> datetime | None:
-        return _utc(value) if value is not None else None
-
-
-class UserLifecycleDailySnapshot(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    snapshot_date: date
-    user_id: int = Field(gt=0)
-    lifecycle_segment: LifecycleSegment
-    lifecycle_reason_code: str = Field(min_length=1, max_length=100)
-    data_quality: Literal["complete", "partial"]
-    calculated_at: datetime
-
-    @field_validator("calculated_at")
-    @classmethod
-    def require_timezone(cls, value: datetime) -> datetime:
-        return _utc(value)
 
 
 class UserActivity(BaseModel):
@@ -294,6 +357,30 @@ class LifecycleTransitionRow(BaseModel):
         return _utc(value)
 
 
+class LegacyLifecycleSnapshot(BaseModel):
+    """One row of the retired ``user_lifecycle_daily_snapshots`` table.
+
+    Read once, by the startup migration, to roll up the legacy days no fact
+    row covers before the table is dropped (``rollups.rollup_legacy_lifecycle_days``).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    snapshot_date: date
+    user_id: int = Field(gt=0)
+    lifecycle_segment: LifecycleSegment
+    data_quality: Literal["complete", "partial"]
+
+
+class LegacyLifecycleHistory(BaseModel):
+    """The legacy days still to roll up, plus their rows and the previous day's."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    days: tuple[date, ...] = ()
+    snapshots: tuple[LegacyLifecycleSnapshot, ...] = ()
+
+
 _DAILY_FACT_COLUMNS = (
     "snapshot_date", "user_id", "lifecycle_segment", "lifecycle_reason_code",
     "operational_state", "operational_reason_code", "tier", "user_group", "active",
@@ -340,6 +427,12 @@ _RECOMPUTE_FACTS_SQL = """
     FROM user_daily_facts
     WHERE snapshot_date >= {p} AND snapshot_date <= {p}
     GROUP BY snapshot_date
+"""
+# Older than every received_at, so a requeued day compares as stale.
+_RECOMPUTE_EPOCH = "1970-01-01T00:00:00+00:00"
+_REQUEUE_RECOMPUTE_SQL = """
+    UPDATE user_daily_facts SET calculated_at = {p}
+    WHERE snapshot_date IN ({days})
 """
 
 
@@ -605,6 +698,99 @@ class CurrentOperationalFacts(BaseModel):
     run_beyond_safe_deadline: bool = False
 
 
+class FactStateCount(BaseModel):
+    """One (operational state, reason, segment) cell of one day's population."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    operational_state: OperationalState
+    # Nullable like the column: history-copy rows carry 'healthy' with no code.
+    operational_reason_code: str | None = None
+    lifecycle_segment: LifecycleSegment
+    users: int = Field(ge=0)
+    partial_rows: int = Field(default=0, ge=0)
+
+
+class SegmentDayCount(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    snapshot_date: date
+    lifecycle_segment: LifecycleSegment
+    users: int = Field(ge=0)
+    partial_rows: int = Field(default=0, ge=0)
+
+
+class TransitionCount(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    from_segment: LifecycleSegment
+    to_segment: LifecycleSegment
+    users: int = Field(ge=0)
+    partial_rows: int = Field(default=0, ge=0)
+
+
+class AttentionCandidate(BaseModel):
+    """A blocked or needs-attention user with their trailing-window run counts."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    user_id: int = Field(gt=0)
+    display_name: str
+    email: str
+    created_at: datetime
+    operational_state: OperationalState
+    operational_reason_code: str | None = None
+    recent_runs: int = Field(default=0, ge=0)
+    recent_failures: int = Field(default=0, ge=0)
+
+
+class GroupFactTotals(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    total_runs: int = Field(default=0, ge=0)
+    operator_cost_micro: int = Field(default=0, ge=0)
+    successful_run_users: int = Field(default=0, ge=0)
+    repeat_users: int = Field(default=0, ge=0)
+    # Rows the daily job (or the PR A history copy) marked partial: their
+    # zeros are not known zeros, so /groups must not call the window ready.
+    partial_rows: int = Field(default=0, ge=0)
+
+
+@dataclass(frozen=True)
+class UserPageQuery:
+    """The users-list filters, dialect-free, so the SQL builder can live here
+    without importing value_queries (which imports this module)."""
+
+    q: str | None = None
+    lifecycle_segment: str | None = None
+    operational_state: str | None = None
+    commercial_tier: str | None = None
+    user_group: str | None = None
+    activated: bool | None = None
+    last_meaningful_activity_from: datetime | None = None
+    last_meaningful_activity_to: datetime | None = None
+    priority: bool = False
+    include_internal: bool = False
+
+
+class UserPageRow(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    user_id: int = Field(gt=0)
+    email: str
+    display_name: str
+    role: str
+    user_group: str
+    created_at: datetime
+    activated_at: datetime | None = None
+    last_meaningful_activity_at: datetime | None = None
+    lifecycle_segment: LifecycleSegment | None = None
+    operational_state: OperationalState = "healthy"
+    operational_reason_code: str = "no_supported_issue"
+    tier: CommercialTier = "unpaid"
+    data_quality: Literal["complete", "partial"] | None = None
+
+
 class ProjectionJob(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -644,85 +830,8 @@ def _validate_window(start: datetime, end: datetime) -> tuple[datetime, datetime
     return window_start, window_end
 
 
-def _legacy_seed(snapshot: UserValueSnapshot) -> tuple[str, str, str]:
-    """Seed compatibility fields only when no legacy projection exists yet."""
-
-    if snapshot.operational_state == "blocked":
-        status = "blocked"
-        reason_code = snapshot.operational_reason_code
-        reason = snapshot.operational_reason
-    elif snapshot.operational_state == "needs_attention":
-        status = "needs_attention"
-        reason_code = snapshot.operational_reason_code
-        reason = snapshot.operational_reason
-    elif snapshot.lifecycle_segment == "dormant":
-        status = "dormant"
-        reason_code = snapshot.lifecycle_reason_code
-        reason = snapshot.lifecycle_reason
-    elif snapshot.lifecycle_segment in {"new", "onboarding"}:
-        status = "onboarding"
-        reason_code = snapshot.lifecycle_reason_code
-        reason = snapshot.lifecycle_reason
-    else:
-        status = "active"
-        reason_code = snapshot.lifecycle_reason_code
-        reason = snapshot.lifecycle_reason
-    return status, reason_code, reason
-
-
-def _current_snapshot_from_row(row: Any) -> UserValueSnapshot | None:
-    """Shared by both twins.
-
-    Moved out of the class (was ``ValueAnalyticsStore._current_snapshot_from_row``,
-    a ``@staticmethod``) so ``value_repository_postgres.py`` can import it
-    directly, mirroring how ``repository_postgres.py`` imports bare functions
-    (``_row_to_event``) from ``repository.py``. No caller outside this module
-    referenced the staticmethod, so this is not a behaviour change.
-    """
-    if row is None or _row_value(row, "lifecycle_segment") is None:
-        return None
-
-    def seq(name: str) -> tuple[str, ...]:
-        try:
-            value = json.loads(_row_value(row, name, "[]"))
-            if not isinstance(value, list) or not all(
-                isinstance(item, str) for item in value
-            ):
-                return ()
-            return tuple(value)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return ()
-
-    return UserValueSnapshot(
-        user_id=int(_row_value(row, "user_id")),
-        lifecycle_segment=_row_value(row, "lifecycle_segment"),
-        lifecycle_reason_code=_row_value(row, "lifecycle_reason_code"),
-        lifecycle_reason=_row_value(row, "lifecycle_reason"),
-        lifecycle_evidence=seq("lifecycle_evidence_json"),
-        operational_state=_row_value(row, "operational_state") or "healthy",
-        operational_reason_code=(
-            _row_value(row, "operational_reason_code") or "no_supported_issue"
-        ),
-        operational_reason=(
-            _row_value(row, "operational_reason")
-            or "No supported current operational issue was detected."
-        ),
-        operational_evidence=seq("operational_evidence_json"),
-        activated_at=_optional_timestamp(_row_value(row, "activated_at")),
-        last_meaningful_activity_at=_optional_timestamp(
-            _row_value(row, "last_meaningful_activity_at")
-        ),
-        inactive_days=int(_row_value(row, "inactive_days", 0)),
-        active_days_30d=int(_row_value(row, "active_days_30d", 0)),
-        successful_backtests_30d=int(
-            _row_value(row, "successful_backtests_30d", 0)
-        ),
-        calculated_at=_timestamp(_row_value(row, "calculated_at")),
-    )
-
-
 def _projection_job_name(value: object) -> str:
-    """Shared by both twins; see ``_current_snapshot_from_row`` above."""
+    """Shared by both twins: ``value_repository_postgres.py`` imports it."""
     if (
         not isinstance(value, str)
         or not value
@@ -731,6 +840,593 @@ def _projection_job_name(value: object) -> str:
     ):
         raise ValueError("job_name must be a trimmed non-empty string")
     return value
+
+
+# -- Set-based fact-table reads (design §6.10). ``{p}`` is the placeholder,
+# ``{internal}`` the optional internal-account exclusion, ``{user_clause}`` the
+# per-twin id clause. Both twins render these; only the placeholder and the id
+# clause differ. ``active`` and ``excluded`` are INTEGER on SQLite and BOOLEAN on
+# Postgres, so the SQL says ``WHERE active`` / ``WHERE excluded`` and never
+# ``= 1``.
+
+_INTERNAL_EXCLUSION_SQL = """
+      AND u.role <> 'admin'
+      AND u.id NOT IN (
+          SELECT user_id FROM analytics_subject_settings WHERE excluded
+      )
+"""
+
+
+def _subject_filter(column: str) -> str:
+    """Read-time exclusion over user-keyed fact rows. Shared by both twins.
+
+    The daily job writes no row for an admin or an excluded account (design
+    SS6), but a row written before the account was excluded or promoted stays
+    in the table for up to 180 days. ``main`` filtered every read through
+    ``_eligible_users``, so an exclusion took effect on the next request;
+    this fragment keeps that, instead of letting it wait for tomorrow's facts
+    (and, for history, for the rows to expire).
+    """
+    return f"""
+      AND {column} NOT IN (SELECT id FROM users WHERE role = 'admin')
+      AND {column} NOT IN (
+          SELECT user_id FROM analytics_subject_settings WHERE excluded
+      )
+"""
+
+
+_COUNT_STATES_SQL = (
+    """
+    SELECT operational_state, operational_reason_code, lifecycle_segment,
+           COUNT(*) AS users,
+           SUM(CASE WHEN data_quality = 'partial' THEN 1 ELSE 0 END) AS partial_rows
+    FROM user_daily_facts
+    WHERE snapshot_date = {p}
+    """
+    + _subject_filter("user_id")
+    + """
+    GROUP BY operational_state, operational_reason_code, lifecycle_segment
+    ORDER BY operational_state, operational_reason_code, lifecycle_segment
+"""
+)
+
+_COUNT_SEGMENTS_SQL = (
+    """
+    SELECT snapshot_date, lifecycle_segment,
+           COUNT(*) AS users,
+           SUM(CASE WHEN data_quality = 'partial' THEN 1 ELSE 0 END) AS partial_rows
+    FROM user_daily_facts
+    WHERE snapshot_date >= {p} AND snapshot_date < {p}
+    """
+    + _subject_filter("user_id")
+    + """
+    GROUP BY snapshot_date, lifecycle_segment
+    ORDER BY snapshot_date, lifecycle_segment
+"""
+)
+
+_COUNT_TRANSITIONS_SQL = (
+    """
+    SELECT from_segment, to_segment,
+           COUNT(*) AS users,
+           SUM(CASE WHEN data_quality = 'partial' THEN 1 ELSE 0 END) AS partial_rows
+    FROM lifecycle_transitions
+    WHERE snapshot_date >= {p} AND snapshot_date < {p}
+    """
+    + _subject_filter("user_id")
+    + """
+    GROUP BY from_segment, to_segment
+    ORDER BY from_segment, to_segment
+"""
+)
+
+_ATTENTION_SQL = (
+    """
+    SELECT f.user_id, f.operational_state, f.operational_reason_code,
+           u.display_name, u.email, u.created_at,
+           COALESCE(SUM(w.runs_requested), 0) AS recent_runs,
+           COALESCE(SUM(w.runs_failed), 0) AS recent_failures
+    FROM user_daily_facts AS f
+    JOIN users AS u ON u.id = f.user_id
+    LEFT JOIN user_daily_facts AS w
+      ON w.user_id = f.user_id
+     AND w.snapshot_date >= {p} AND w.snapshot_date <= {p}
+    WHERE f.snapshot_date = {p}
+      AND f.operational_state IN ('blocked', 'needs_attention')
+    """
+    + _subject_filter("f.user_id")
+    + """
+    GROUP BY f.user_id, f.operational_state, f.operational_reason_code,
+             u.display_name, u.email, u.created_at
+    ORDER BY recent_failures DESC, f.user_id DESC
+    LIMIT {p}
+"""
+)
+
+_REPLACE_TRANSITIONS_DELETE_SQL = (
+    """
+    DELETE FROM lifecycle_transitions
+    WHERE snapshot_date = {p}
+    """
+    + _subject_filter("user_id")
+)
+
+_UPSERT_TRANSITIONS_SQL = f"""
+    INSERT INTO lifecycle_transitions ({", ".join(_TRANSITION_COLUMNS)})
+    VALUES ({", ".join("{p}" for _ in _TRANSITION_COLUMNS)})
+    ON CONFLICT(user_id, snapshot_date) DO UPDATE SET {_TRANSITION_UPDATES}
+"""
+
+_FACTS_FOR_DATE_SQL = (
+    """
+    SELECT * FROM user_daily_facts
+    WHERE snapshot_date = {p}
+    """
+    + _subject_filter("user_id")
+    + """
+    ORDER BY user_id
+"""
+)
+
+# The PR A history copy (``copy_daily_snapshot_history``) filled
+# ``user_daily_facts`` from the legacy table and wrote no transition log, and
+# the legacy rollup skips any day a fact row covers, so 07-29..09-22 had no
+# movement source once ``_history`` stopped deriving it from the legacy rows.
+# The startup migration derives it from consecutive fact days, and for a first
+# fact day whose predecessor exists only in the legacy table, from that table
+# while it still exists. ``{prev}`` is the dialect's "the day before
+# cur.snapshot_date" as YYYY-MM-DD text; ``{days}`` / ``{segments}`` are
+# placeholder lists. ``inactive_days`` is not on a fact row; 0 is the column
+# default and nothing reads it off a transition.
+_DAYS_WITHOUT_TRANSITIONS_SQL = """
+    SELECT DISTINCT f.snapshot_date
+    FROM user_daily_facts AS f
+    WHERE NOT EXISTS (
+        SELECT 1 FROM lifecycle_transitions AS t
+        WHERE t.snapshot_date = f.snapshot_date
+    )
+    ORDER BY f.snapshot_date
+"""
+
+_BACKFILL_TRANSITIONS_SQL = """
+    INSERT INTO lifecycle_transitions (
+        user_id, snapshot_date, from_segment, to_segment, inactive_days,
+        data_quality, created_at
+    )
+    SELECT cur.user_id, cur.snapshot_date, prev.lifecycle_segment,
+           cur.lifecycle_segment, 0,
+           CASE WHEN cur.data_quality = 'partial' OR prev.data_quality = 'partial'
+                THEN 'partial' ELSE 'complete' END,
+           {p}
+    FROM user_daily_facts AS cur
+    JOIN {source} AS prev
+      ON prev.user_id = cur.user_id AND prev.snapshot_date = {prev}
+    WHERE cur.snapshot_date IN ({days})
+      AND prev.lifecycle_segment <> cur.lifecycle_segment
+      AND prev.lifecycle_segment IN ({segments})
+      {guard}
+    ON CONFLICT (user_id, snapshot_date) DO NOTHING
+"""
+
+# Only for the legacy source: a day whose predecessor has facts takes its
+# previous segment from them, never from the table being retired.
+_NO_PRIOR_FACT_DAY_SQL = """
+      AND NOT EXISTS (
+          SELECT 1 FROM user_daily_facts AS pf WHERE pf.snapshot_date = {prev}
+      )
+"""
+
+
+def _backfill_transition_statements(
+    *, p: str, prev: str, days: Sequence[str]
+) -> list[tuple[str, list[str]]]:
+    """(sql, params) per source, facts first. Shared by both twins."""
+    segments = sorted(LIFECYCLE_SEGMENTS)
+    day_marks = ", ".join(p for _ in days)
+    segment_marks = ", ".join(p for _ in segments)
+    statements = []
+    for source, guard in (
+        ("user_daily_facts", ""),
+        ("user_lifecycle_daily_snapshots", _NO_PRIOR_FACT_DAY_SQL.format(prev=prev)),
+    ):
+        statements.append(
+            (
+                _BACKFILL_TRANSITIONS_SQL.format(
+                    p=p,
+                    source=source,
+                    prev=prev,
+                    days=day_marks,
+                    segments=segment_marks,
+                    guard=guard,
+                ),
+                [*days, *segments],
+            )
+        )
+    return statements
+
+# The legacy days the drop would otherwise destroy: no fact row covers them
+# and no lifecycle rollup was ever written for them (design SS6.9 "Movement
+# charts keep their history"). {metrics} is the lifecycle-owned families, so a
+# day already rolled up -- by an earlier boot whose drop failed, or by the
+# retention sweep -- is never overwritten.
+_LEGACY_UNROLLED_DATES_SQL = """
+    SELECT DISTINCT s.snapshot_date
+    FROM user_lifecycle_daily_snapshots AS s
+    WHERE NOT EXISTS (
+        SELECT 1 FROM user_daily_facts AS f
+        WHERE f.snapshot_date = s.snapshot_date
+    )
+      AND NOT EXISTS (
+        SELECT 1 FROM analytics_daily_rollups AS r
+        WHERE r.rollup_date = s.snapshot_date
+          AND r.metric_name IN ({metrics})
+    )
+    ORDER BY s.snapshot_date
+"""
+
+_LEGACY_SNAPSHOTS_SQL = """
+    SELECT snapshot_date, user_id, lifecycle_segment, data_quality
+    FROM user_lifecycle_daily_snapshots
+    WHERE {date_clause}
+    ORDER BY snapshot_date, user_id
+"""
+
+
+def _legacy_snapshot(row: Any) -> LegacyLifecycleSnapshot:
+    """Shared by both twins."""
+    return LegacyLifecycleSnapshot(
+        snapshot_date=date.fromisoformat(str(_row_value(row, "snapshot_date"))),
+        user_id=int(_row_value(row, "user_id")),
+        lifecycle_segment=_row_value(row, "lifecycle_segment"),
+        data_quality=_row_value(row, "data_quality"),
+    )
+
+
+def _legacy_read_dates(days: Sequence[date]) -> list[str]:
+    """Each unrolled day plus the day before it, for its transitions. Shared."""
+    wanted = set(days) | {day - timedelta(days=1) for day in days}
+    return sorted(day.isoformat() for day in wanted)
+
+
+def _sqlite_table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    """Locale-proof: asks the catalogue rather than parsing an error message."""
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        is not None
+    )
+
+
+_GROUP_TOTALS_SQL = (
+    """
+    SELECT user_group,
+           COALESCE(SUM(runs_requested), 0) AS total_runs,
+           COALESCE(SUM(operator_cost_micro), 0) AS operator_cost_micro,
+           COUNT(DISTINCT CASE WHEN runs_completed > 0 THEN user_id END)
+               AS successful_run_users,
+           COALESCE(SUM(CASE WHEN data_quality = 'partial' THEN 1 ELSE 0 END), 0)
+               AS partial_rows
+    FROM user_daily_facts
+    WHERE snapshot_date >= {p} AND snapshot_date < {p}
+    """
+    + _subject_filter("user_id")
+    + """
+    GROUP BY user_group
+"""
+)
+
+_LATEST_FACT_DATE_SQL = """
+    SELECT MAX(snapshot_date) AS latest
+    FROM user_daily_facts
+    WHERE snapshot_date <= {p}
+"""
+
+
+def _latest_fact_date(row: Any) -> date | None:
+    """Shared by both twins."""
+    latest = _row_value(row, "latest") if row is not None else None
+    return date.fromisoformat(str(latest)) if latest else None
+
+
+_GROUP_REPEAT_SQL = (
+    """
+    SELECT user_group, COUNT(*) AS repeat_users
+    FROM (
+        SELECT user_group, user_id
+        FROM user_daily_facts
+        WHERE snapshot_date >= {p} AND snapshot_date < {p}
+          AND runs_completed > 0
+        """
+    + _subject_filter("user_id")
+    + """
+        GROUP BY user_group, user_id
+        HAVING COUNT(*) >= 2
+    ) AS repeaters
+    GROUP BY user_group
+"""
+)
+
+_ACTIVE_DATES_SQL = """
+    SELECT user_id, snapshot_date
+    FROM user_daily_facts
+    WHERE snapshot_date >= {p} AND snapshot_date < {p}
+      AND active{user_clause}
+    ORDER BY user_id, snapshot_date
+"""
+
+_ACTIVATIONS_SQL = """
+    SELECT a.user_id, a.activated_at
+    FROM user_activity AS a
+    JOIN users AS u ON u.id = a.user_id
+    WHERE a.activated_at IS NOT NULL
+      AND a.activated_at >= {p} AND a.activated_at < {p}
+      {internal}
+    ORDER BY a.user_id
+"""
+
+_COUNT_ACTIVATED_SQL = """
+    SELECT COUNT(*) AS activated
+    FROM user_activity AS a
+    JOIN users AS u ON u.id = a.user_id
+    WHERE a.activated_at IS NOT NULL
+      {internal}
+"""
+
+_USER_TRANSITIONS_SQL = """
+    SELECT * FROM lifecycle_transitions
+    WHERE user_id = {p}
+      AND snapshot_date >= {p} AND snapshot_date < {p}
+    ORDER BY snapshot_date, transition_id
+"""
+
+_TRANSITIONS_FOR_DATE_SQL = (
+    """
+    SELECT * FROM lifecycle_transitions
+    WHERE snapshot_date = {p}
+    """
+    + _subject_filter("user_id")
+    + """
+    ORDER BY user_id
+"""
+)
+
+
+_USERS_PAGE_SELECT = """
+    SELECT u.id AS user_id, u.email, u.display_name, u.role, u.user_group,
+           u.created_at, a.activated_at, a.last_meaningful_activity_at,
+           f.lifecycle_segment, f.operational_state, f.operational_reason_code,
+           f.tier, f.data_quality
+"""
+_USERS_PAGE_FROM = """
+    FROM users AS u
+    LEFT JOIN user_activity AS a ON a.user_id = u.id
+    LEFT JOIN user_daily_facts AS f
+      ON f.user_id = u.id AND f.snapshot_date = {p}
+"""
+_USERS_PAGE_PRIORITY_ORDER = """
+    ORDER BY CASE COALESCE(f.operational_state, 'healthy')
+                 WHEN 'blocked' THEN 0
+                 WHEN 'needs_attention' THEN 1
+                 ELSE CASE f.lifecycle_segment
+                          WHEN 'at_risk' THEN 2
+                          WHEN 'onboarding' THEN 3
+                          ELSE 4
+                      END
+             END ASC,
+             CASE COALESCE(f.tier, 'unpaid')
+                 WHEN 'high_value' THEN 0
+                 WHEN 'invested' THEN 1
+                 WHEN 'starter' THEN 2
+                 ELSE 3
+             END ASC,
+             CASE WHEN a.last_meaningful_activity_at IS NULL THEN 0 ELSE 1 END ASC,
+             a.last_meaningful_activity_at ASC,
+             u.id ASC
+"""
+
+
+def _users_page_sql(
+    query: UserPageQuery, *, day: date, limit: int, offset: int, p: str
+) -> tuple[str, str, list[Any], list[Any]]:
+    """Render (page_sql, count_sql, page_params, count_params) for one dialect.
+
+    Every predicate is parameterised; the only interpolated text is the fixed
+    every filter is a parameter, never interpolated text. The LIKE pattern
+    comes from users.admin_user_search_pattern so '%' and '_' in a search are
+    literal, exactly as the account console's own search treats them.
+    """
+    from dashboard.backend.users import admin_user_search_pattern
+
+    where: list[str] = []
+    params: list[Any] = [_validate_day(day)]
+    if not query.include_internal:
+        where.append(
+            "u.role <> 'admin' AND u.id NOT IN "
+            "(SELECT user_id FROM analytics_subject_settings WHERE excluded)"
+        )
+    pattern = admin_user_search_pattern(query.q)
+    if pattern is not None:
+        where.append(
+            f"(lower(u.email) LIKE lower({p}) ESCAPE '\\'"
+            f" OR lower(u.display_name) LIKE lower({p}) ESCAPE '\\')"
+        )
+        params.extend([pattern, pattern])
+    if query.user_group is not None:
+        where.append(f"u.user_group = {p}")
+        params.append(query.user_group)
+    if query.commercial_tier is not None:
+        where.append(f"COALESCE(f.tier, 'unpaid') = {p}")
+        params.append(query.commercial_tier)
+    if query.operational_state is not None:
+        where.append(f"COALESCE(f.operational_state, 'healthy') = {p}")
+        params.append(query.operational_state)
+    if query.lifecycle_segment is not None:
+        where.append(f"f.lifecycle_segment = {p}")
+        params.append(query.lifecycle_segment)
+    if query.activated is True:
+        where.append("a.activated_at IS NOT NULL")
+    elif query.activated is False:
+        where.append("a.activated_at IS NULL")
+    if query.last_meaningful_activity_from is not None:
+        where.append(f"a.last_meaningful_activity_at >= {p}")
+        params.append(utc_iso(_utc(query.last_meaningful_activity_from)))
+    if query.last_meaningful_activity_to is not None:
+        where.append(f"a.last_meaningful_activity_at <= {p}")
+        params.append(utc_iso(_utc(query.last_meaningful_activity_to)))
+    if query.priority:
+        where.append(
+            "(COALESCE(f.operational_state, 'healthy') IN ('blocked', 'needs_attention')"
+            " OR f.lifecycle_segment IN ('at_risk', 'onboarding'))"
+        )
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    from_sql = _USERS_PAGE_FROM.format(p=p)
+    order_sql = _USERS_PAGE_PRIORITY_ORDER if query.priority else " ORDER BY u.id ASC"
+    page_sql = (
+        f"{_USERS_PAGE_SELECT}{from_sql}{where_sql}{order_sql} LIMIT {p} OFFSET {p}"
+    )
+    count_sql = f"SELECT COUNT(*) AS total{from_sql}{where_sql}"
+    return page_sql, count_sql, [*params, limit, offset], list(params)
+
+
+def _validate_page_window(limit: int, offset: int) -> tuple[int, int]:
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ValueError("offset must be a non-negative integer")
+    return positive_limit(limit), offset
+
+
+def _user_page_row(row: Any) -> UserPageRow:
+    """Shared by both twins."""
+    return UserPageRow(
+        user_id=int(_row_value(row, "user_id")),
+        email=str(_row_value(row, "email") or ""),
+        display_name=str(_row_value(row, "display_name") or ""),
+        role=str(_row_value(row, "role") or "user"),
+        user_group=str(_row_value(row, "user_group") or "unknown"),
+        created_at=_timestamp(_row_value(row, "created_at")),
+        activated_at=_optional_timestamp(_row_value(row, "activated_at")),
+        last_meaningful_activity_at=_optional_timestamp(
+            _row_value(row, "last_meaningful_activity_at")
+        ),
+        lifecycle_segment=_row_value(row, "lifecycle_segment"),
+        operational_state=_row_value(row, "operational_state") or "healthy",
+        operational_reason_code=(
+            _row_value(row, "operational_reason_code") or "no_supported_issue"
+        ),
+        tier=_row_value(row, "tier") or "unpaid",
+        data_quality=_row_value(row, "data_quality"),
+    )
+
+
+def _transition_row(row: Any) -> LifecycleTransitionRow:
+    """Shared by both twins."""
+    return LifecycleTransitionRow(
+        user_id=int(_row_value(row, "user_id")),
+        snapshot_date=date.fromisoformat(str(_row_value(row, "snapshot_date"))),
+        from_segment=_row_value(row, "from_segment"),
+        to_segment=_row_value(row, "to_segment"),
+        inactive_days=int(_row_value(row, "inactive_days", 0)),
+        data_quality=_row_value(row, "data_quality"),
+        created_at=_timestamp(_row_value(row, "created_at")),
+    )
+
+
+def _attention_candidate(row: Any) -> AttentionCandidate:
+    """Shared by both twins."""
+    return AttentionCandidate(
+        user_id=int(_row_value(row, "user_id")),
+        display_name=str(_row_value(row, "display_name") or ""),
+        email=str(_row_value(row, "email") or ""),
+        created_at=_timestamp(_row_value(row, "created_at")),
+        operational_state=_row_value(row, "operational_state"),
+        operational_reason_code=_row_value(row, "operational_reason_code"),
+        recent_runs=int(_row_value(row, "recent_runs", 0) or 0),
+        recent_failures=int(_row_value(row, "recent_failures", 0) or 0),
+    )
+
+
+def _group_totals(
+    totals: Sequence[Any], repeats: Sequence[Any]
+) -> dict[str, GroupFactTotals]:
+    """Shared by both twins."""
+    repeat_by_group = {
+        str(_row_value(row, "user_group")): int(_row_value(row, "repeat_users", 0) or 0)
+        for row in repeats
+    }
+    return {
+        str(_row_value(row, "user_group")): GroupFactTotals(
+            total_runs=int(_row_value(row, "total_runs", 0) or 0),
+            operator_cost_micro=max(int(_row_value(row, "operator_cost_micro", 0) or 0), 0),
+            successful_run_users=int(_row_value(row, "successful_run_users", 0) or 0),
+            repeat_users=repeat_by_group.get(str(_row_value(row, "user_group")), 0),
+            partial_rows=int(_row_value(row, "partial_rows", 0) or 0),
+        )
+        for row in totals
+    }
+
+
+def _fact_state_count(row: Any) -> FactStateCount:
+    """Shared by both twins."""
+    return FactStateCount(
+        operational_state=_row_value(row, "operational_state"),
+        operational_reason_code=_row_value(row, "operational_reason_code"),
+        lifecycle_segment=_row_value(row, "lifecycle_segment"),
+        users=int(_row_value(row, "users", 0)),
+        partial_rows=int(_row_value(row, "partial_rows", 0) or 0),
+    )
+
+
+def _segment_day_count(row: Any) -> SegmentDayCount:
+    """Shared by both twins."""
+    return SegmentDayCount(
+        snapshot_date=date.fromisoformat(str(_row_value(row, "snapshot_date"))),
+        lifecycle_segment=_row_value(row, "lifecycle_segment"),
+        users=int(_row_value(row, "users", 0)),
+        partial_rows=int(_row_value(row, "partial_rows", 0) or 0),
+    )
+
+
+def _transition_count(row: Any) -> TransitionCount:
+    """Shared by both twins."""
+    return TransitionCount(
+        from_segment=_row_value(row, "from_segment"),
+        to_segment=_row_value(row, "to_segment"),
+        users=int(_row_value(row, "users", 0)),
+        partial_rows=int(_row_value(row, "partial_rows", 0) or 0),
+    )
+
+
+def _validate_day(day: date) -> str:
+    if not isinstance(day, date) or isinstance(day, datetime):
+        raise ValueError("day must be a date")
+    return day.isoformat()
+
+
+def _validate_date_window(start: date, end: date) -> tuple[str, str]:
+    """Half-open ``[start, end)`` over dates, as ISO strings."""
+    if not isinstance(start, date) or isinstance(start, datetime):
+        raise ValueError("start must be a date")
+    if not isinstance(end, date) or isinstance(end, datetime):
+        raise ValueError("end must be a date")
+    if end <= start:
+        raise ValueError("end must be later than start")
+    return start.isoformat(), end.isoformat()
+
+
+def _id_chunks(user_ids: Sequence[int]) -> list[list[int]]:
+    """Dedupe ``user_ids`` and split into ``MAX_USER_BATCH``-sized chunks.
+
+    ``_ids`` refuses more than one batch; a whole-population caller (the
+    retention cohorts) needs a read that spans several.
+    """
+    if not isinstance(user_ids, (list, tuple)):
+        raise ValueError("user_ids must be a list or tuple")
+    values = list(dict.fromkeys(positive_user_id(item) for item in user_ids))
+    return [
+        values[index : index + MAX_USER_BATCH]
+        for index in range(0, len(values), MAX_USER_BATCH)
+    ]
 
 
 class ValueAnalyticsStore:
@@ -793,178 +1489,6 @@ class ValueAnalyticsStore:
     def _analytics_connection(self):
         return self.analytics_base._get_connection()
 
-    def upsert_current_snapshot(self, snapshot: UserValueSnapshot) -> UserValueSnapshot:
-        def evidence(value: Sequence[str]) -> str:
-            return json.dumps(
-                list(value),
-                separators=(",", ":"),
-                ensure_ascii=True,
-            )
-
-        legacy_status, legacy_reason_code, legacy_reason = _legacy_seed(snapshot)
-        values = (
-            snapshot.user_id,
-            legacy_status,
-            legacy_reason_code,
-            legacy_reason,
-            "[]",
-            snapshot.lifecycle_segment,
-            snapshot.lifecycle_reason_code,
-            snapshot.lifecycle_reason,
-            evidence(snapshot.lifecycle_evidence),
-            snapshot.operational_state,
-            snapshot.operational_reason_code,
-            snapshot.operational_reason,
-            evidence(snapshot.operational_evidence),
-            utc_iso(snapshot.activated_at) if snapshot.activated_at else None,
-            (
-                utc_iso(snapshot.last_meaningful_activity_at)
-                if snapshot.last_meaningful_activity_at
-                else None
-            ),
-            snapshot.inactive_days,
-            snapshot.active_days_30d,
-            snapshot.successful_backtests_30d,
-            utc_iso(snapshot.calculated_at),
-        )
-        columns = """
-            user_id, status, reason_code, human_readable_reason,
-            evidence_event_ids_json, lifecycle_segment, lifecycle_reason_code,
-            lifecycle_reason, lifecycle_evidence_json, operational_state,
-            operational_reason_code, operational_reason,
-            operational_evidence_json, activated_at,
-            last_meaningful_activity_at, inactive_days, active_days_30d,
-            successful_backtests_30d, calculated_at
-        """
-        updates = """
-            lifecycle_segment=excluded.lifecycle_segment,
-            lifecycle_reason_code=excluded.lifecycle_reason_code,
-            lifecycle_reason=excluded.lifecycle_reason,
-            lifecycle_evidence_json=excluded.lifecycle_evidence_json,
-            operational_state=excluded.operational_state,
-            operational_reason_code=excluded.operational_reason_code,
-            operational_reason=excluded.operational_reason,
-            operational_evidence_json=excluded.operational_evidence_json,
-            activated_at=excluded.activated_at,
-            last_meaningful_activity_at=excluded.last_meaningful_activity_at,
-            inactive_days=excluded.inactive_days,
-            active_days_30d=excluded.active_days_30d,
-            successful_backtests_30d=excluded.successful_backtests_30d,
-            calculated_at=excluded.calculated_at
-        """
-        with self._analytics_connection() as conn:
-            conn.execute(
-                f"""
-                INSERT INTO user_analytics_snapshots ({columns})
-                VALUES ({", ".join(["?"] * len(values))})
-                ON CONFLICT(user_id) DO UPDATE SET {updates}
-                """,
-                values,
-            )
-        return snapshot
-
-    def get_current_snapshot(self, user_id: int) -> UserValueSnapshot | None:
-        subject = positive_user_id(user_id)
-        with self._analytics_connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM user_analytics_snapshots WHERE user_id=?", (subject,)
-            ).fetchone()
-        return _current_snapshot_from_row(row)
-
-    def list_current_snapshots(
-        self,
-        user_ids: Sequence[int],
-    ) -> dict[int, UserValueSnapshot]:
-        ids = _ids(user_ids)
-        if not ids:
-            return {}
-        result: dict[int, UserValueSnapshot] = {}
-        for offset in range(0, len(ids), MAX_USER_BATCH):
-            chunk = ids[offset : offset + MAX_USER_BATCH]
-            clause = f"user_id IN ({', '.join('?' for _ in chunk)})"
-            with self._analytics_connection() as conn:
-                rows = conn.execute(
-                    f"""
-                    SELECT *
-                    FROM user_analytics_snapshots
-                    WHERE {clause} AND lifecycle_segment IS NOT NULL
-                    ORDER BY user_id
-                    """,
-                    chunk,
-                ).fetchall()
-            for row in rows:
-                user_id = int(_row_value(row, "user_id"))
-                snapshot = _current_snapshot_from_row(row)
-                if snapshot is not None:
-                    result[user_id] = snapshot
-        return result
-
-    def upsert_daily_snapshot(
-        self,
-        snapshot: UserLifecycleDailySnapshot,
-    ) -> UserLifecycleDailySnapshot:
-        values = (
-            snapshot.snapshot_date.isoformat(),
-            snapshot.user_id,
-            snapshot.lifecycle_segment,
-            snapshot.lifecycle_reason_code,
-            snapshot.data_quality,
-            utc_iso(snapshot.calculated_at),
-        )
-        sql = """
-            INSERT INTO user_lifecycle_daily_snapshots (
-                snapshot_date, user_id, lifecycle_segment,
-                lifecycle_reason_code, data_quality, calculated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(snapshot_date, user_id) DO UPDATE SET
-                lifecycle_segment=excluded.lifecycle_segment,
-                lifecycle_reason_code=excluded.lifecycle_reason_code,
-                data_quality=excluded.data_quality,
-                calculated_at=excluded.calculated_at
-        """
-        with self._analytics_connection() as conn:
-            conn.execute(sql, values)
-        return snapshot
-
-    def list_daily_snapshots(
-        self,
-        *,
-        start: date,
-        end: date,
-        user_ids: Sequence[int] | None = None,
-    ) -> list[UserLifecycleDailySnapshot]:
-        if end <= start:
-            raise ValueError("end must be later than start")
-        ids = _ids(user_ids) if user_ids is not None else None
-        if ids == []:
-            return []
-        params: list[Any] = [start.isoformat(), end.isoformat()]
-        clause = ""
-        if ids:
-            clause = f" AND user_id IN ({','.join('?' for _ in ids)})"
-            params.extend(ids)
-        sql = f"""
-            SELECT *
-            FROM user_lifecycle_daily_snapshots
-            WHERE snapshot_date >= ?
-              AND snapshot_date < ?
-              {clause}
-            ORDER BY snapshot_date, user_id
-        """
-        with self._analytics_connection() as conn:
-            rows = conn.execute(sql, params).fetchall()
-        return [
-            UserLifecycleDailySnapshot(
-                snapshot_date=date.fromisoformat(str(_row_value(row, "snapshot_date"))),
-                user_id=int(_row_value(row, "user_id")),
-                lifecycle_segment=_row_value(row, "lifecycle_segment"),
-                lifecycle_reason_code=_row_value(row, "lifecycle_reason_code"),
-                data_quality=_row_value(row, "data_quality"),
-                calculated_at=_timestamp(_row_value(row, "calculated_at")),
-            )
-            for row in rows
-        ]
-
     def replace_lifecycle_rollups(
         self,
         day: date,
@@ -974,72 +1498,11 @@ class ValueAnalyticsStore:
     ) -> None:
         """Replace only lifecycle aggregates, preserving other daily metrics."""
 
-        values = list(rows)
-        columns = (
-            "rollup_date",
-            "metric_name",
-            "event_name",
-            "billing_mode",
-            "provider_id",
-            "model_id",
-            "outcome",
-            "error_category",
-            "user_state",
-            "value_count",
-            "value_sum_micro",
-            "updated_at",
+        payloads = _lifecycle_rollup_payloads(
+            day, list(rows), replace_transitions=replace_transitions
         )
-        payloads = []
-        for row in values:
-            if (
-                row.rollup_date != day
-                or row.metric_name not in LIFECYCLE_ROLLUP_METRICS
-            ):
-                raise ValueError("invalid lifecycle rollup row")
-            if row.metric_name == "lifecycle_segment_count":
-                valid_dimensions = (
-                    not row.event_name and row.user_state in LIFECYCLE_SEGMENTS
-                )
-            else:
-                valid_dimensions = (
-                    replace_transitions
-                    and row.event_name in LIFECYCLE_SEGMENTS
-                    and row.user_state in LIFECYCLE_SEGMENTS
-                    and row.event_name != row.user_state
-                )
-            unused_dimensions = (
-                row.billing_mode,
-                row.provider_id,
-                row.model_id,
-                row.error_category,
-            )
-            if (
-                not valid_dimensions
-                or any(unused_dimensions)
-                or row.outcome not in {"complete", "partial"}
-                or row.value_sum_micro != 0
-            ):
-                raise ValueError("invalid lifecycle rollup dimensions")
-            payloads.append(
-                (
-                    row.rollup_date.isoformat(),
-                    row.metric_name,
-                    row.event_name,
-                    row.billing_mode,
-                    row.provider_id,
-                    row.model_id,
-                    row.outcome,
-                    row.error_category,
-                    row.user_state,
-                    row.value_count,
-                    row.value_sum_micro,
-                    utc_iso(row.updated_at),
-                )
-            )
-        placeholders = ", ".join(["?"] * len(columns))
-        metrics = ["lifecycle_segment_count"]
-        if replace_transitions:
-            metrics.append("lifecycle_transition")
+        placeholders = ", ".join(["?"] * len(_ROLLUP_COLUMNS))
+        metrics = _replaced_lifecycle_metrics(replace_transitions=replace_transitions)
         metric_placeholders = ", ".join(["?"] * len(metrics))
         with self._analytics_connection() as conn:
             conn.execute(
@@ -1053,58 +1516,67 @@ class ValueAnalyticsStore:
             if payloads:
                 conn.executemany(
                     f"""
-                    INSERT INTO analytics_daily_rollups ({', '.join(columns)})
+                    INSERT INTO analytics_daily_rollups ({', '.join(_ROLLUP_COLUMNS)})
                     VALUES ({placeholders})
                     """,
                     payloads,
                 )
 
-    def list_expiring_daily_dates(
-        self,
-        *,
-        before: date,
-        limit: int,
-    ) -> list[date]:
+    def list_expiring_fact_dates(self, *, before: date, limit: int) -> list[date]:
+        """Distinct dates older than ``before`` in either user-keyed table."""
         if not isinstance(before, date) or isinstance(before, datetime):
             raise ValueError("before must be a date")
         page_size = positive_limit(limit, maximum=1000)
         sql = """
-            SELECT DISTINCT snapshot_date
-            FROM user_lifecycle_daily_snapshots
-            WHERE snapshot_date < ?
+            SELECT snapshot_date FROM (
+                SELECT DISTINCT snapshot_date FROM user_daily_facts
+                WHERE snapshot_date < ?
+                UNION
+                SELECT DISTINCT snapshot_date FROM lifecycle_transitions
+                WHERE snapshot_date < ?
+            ) AS expiring
             ORDER BY snapshot_date
             LIMIT ?
         """
         with self._analytics_connection() as conn:
-            rows = conn.execute(sql, (before.isoformat(), page_size)).fetchall()
+            rows = conn.execute(
+                sql, (before.isoformat(), before.isoformat(), page_size)
+            ).fetchall()
         return [
             date.fromisoformat(str(_row_value(row, "snapshot_date"))) for row in rows
         ]
 
-    def delete_daily_snapshots_for_date(self, day: date) -> int:
+    def expire_facts_for_date(self, day: date) -> int:
+        """Delete one day's facts and transitions in one transaction.
+
+        Both tables or neither: a transition log that outlived its day's
+        facts would be counted again by any later rollup of that day.
+        """
         if not isinstance(day, date) or isinstance(day, datetime):
             raise ValueError("day must be a date")
         with self._analytics_connection() as conn:
-            cursor = conn.execute(
-                """
-                DELETE FROM user_lifecycle_daily_snapshots
-                WHERE snapshot_date = ?
-                """,
-                (day.isoformat(),),
-            )
-            return max(0, int(cursor.rowcount))
+            deleted = 0
+            for table in ("user_daily_facts", "lifecycle_transitions"):
+                cursor = conn.execute(
+                    f"DELETE FROM {table} WHERE snapshot_date = ?",
+                    (day.isoformat(),),
+                )
+                deleted += max(0, int(cursor.rowcount))
+            return deleted
 
-    def has_daily_before(self, before: date) -> bool:
+    def has_facts_before(self, before: date) -> bool:
         if not isinstance(before, date) or isinstance(before, datetime):
             raise ValueError("before must be a date")
         sql = """
-            SELECT 1
-            FROM user_lifecycle_daily_snapshots
-            WHERE snapshot_date < ?
+            SELECT 1 FROM user_daily_facts WHERE snapshot_date < ?
+            UNION ALL
+            SELECT 1 FROM lifecycle_transitions WHERE snapshot_date < ?
             LIMIT 1
         """
         with self._analytics_connection() as conn:
-            row = conn.execute(sql, (before.isoformat(),)).fetchone()
+            row = conn.execute(
+                sql, (before.isoformat(), before.isoformat())
+            ).fetchone()
         return row is not None
 
     def record_activity(
@@ -1189,7 +1661,7 @@ class ValueAnalyticsStore:
 
         ``None`` is the daily job's shape: one statement over the whole
         population, parameterised by nothing. A sequence is batched by
-        ``MAX_USER_BATCH`` the way ``list_current_snapshots`` already is.
+        ``MAX_USER_BATCH``.
         """
         result: dict[int, UserActivity] = {}
         if user_ids is None:
@@ -1220,16 +1692,23 @@ class ValueAnalyticsStore:
     def seed_activity_from_snapshots(self, *, now: datetime) -> int:
         """Copy ``activated_at`` / ``last_meaningful_activity_at`` from the legacy row.
 
-        Design SS11: ``user_analytics_snapshots`` is the only table that knows
-        when an existing user first activated, and it is dropped in PR B.
-        Ingestion only maintains ``user_activity`` for events arriving after
-        this deploy, so without this copy every pre-existing activation date
-        would vanish on the night of the drop.
+        Design SS11: ``user_analytics_snapshots`` was the only table that
+        knew when an existing user first activated, and
+        ``run_startup_migrations`` drops it. Ingestion only maintains
+        ``user_activity`` for events arriving after the deploy that created
+        it, so without this copy every pre-existing activation date would
+        vanish with the drop.
 
         Idempotent by construction -- the same MIN/MAX upsert
-        ``record_activity`` uses -- so PR B can re-run it immediately before
-        the drop (the legacy row keeps being maintained by the throttled
-        repair between the two PRs). Returns the number of rows touched.
+        ``record_activity`` uses -- so it runs immediately before the drop on
+        every boot, including one where the legacy row moved since the last.
+        Returns the number of rows touched.
+
+        Returns 0 once the table is gone: ``run_startup_migrations`` drops it
+        right after this read and runs on every boot, and a fresh install's
+        DDL never creates it. Absence is read from the catalogue, never from
+        an error message; any failure (a legacy row missing the columns read
+        here) still raises.
         """
         stamp = utc_iso(_utc(now, "now"))
         sql = """
@@ -1258,8 +1737,47 @@ class ValueAnalyticsStore:
                 updated_at = excluded.updated_at
         """
         with self._analytics_connection() as conn:
+            if not _sqlite_table_exists(conn, "user_analytics_snapshots"):
+                return 0
             cursor = conn.execute(sql, (stamp,))
             return max(0, int(cursor.rowcount))
+
+    def list_legacy_lifecycle_history(self) -> LegacyLifecycleHistory:
+        """The legacy lifecycle days no fact row and no lifecycle rollup covers.
+
+        Read by the startup migration immediately before the drop, so those
+        days survive it as anonymous rollups. Empty once the table is gone
+        (every boot after the drop, and a fresh install); any other failure
+        raises, which skips the drop.
+        """
+        metrics = sorted(LIFECYCLE_ROLLUP_METRICS)
+        with self._analytics_connection() as conn:
+            if not _sqlite_table_exists(conn, "user_lifecycle_daily_snapshots"):
+                return LegacyLifecycleHistory()
+            day_rows = conn.execute(
+                _LEGACY_UNROLLED_DATES_SQL.format(
+                    metrics=", ".join("?" for _ in metrics)
+                ),
+                metrics,
+            ).fetchall()
+            days = tuple(
+                date.fromisoformat(str(_row_value(row, "snapshot_date")))
+                for row in day_rows
+            )
+            if not days:
+                return LegacyLifecycleHistory()
+            read_dates = _legacy_read_dates(days)
+            rows = conn.execute(
+                _LEGACY_SNAPSHOTS_SQL.format(
+                    date_clause=(
+                        f"snapshot_date IN ({', '.join('?' for _ in read_dates)})"
+                    )
+                ),
+                read_dates,
+            ).fetchall()
+        return LegacyLifecycleHistory(
+            days=days, snapshots=tuple(_legacy_snapshot(row) for row in rows)
+        )
 
     def sum_recent_facts(
         self,
@@ -1293,6 +1811,153 @@ class ValueAnalyticsStore:
             int(_row_value(row, "user_id")): _recent_totals_from_row(row)
             for row in rows
         }
+
+    # -- Fact-table reads (design §6.10). One statement each, never per user. --
+
+    def count_states_for_date(self, day: date) -> list[FactStateCount]:
+        params = (_validate_day(day),)
+        with self._analytics_connection() as conn:
+            rows = conn.execute(_COUNT_STATES_SQL.format(p="?"), params).fetchall()
+        return [_fact_state_count(row) for row in rows]
+
+    def count_segments_by_date(
+        self, *, start: date, end: date
+    ) -> list[SegmentDayCount]:
+        params = _validate_date_window(start, end)
+        with self._analytics_connection() as conn:
+            rows = conn.execute(_COUNT_SEGMENTS_SQL.format(p="?"), params).fetchall()
+        return [_segment_day_count(row) for row in rows]
+
+    def count_transitions(self, *, start: date, end: date) -> list[TransitionCount]:
+        params = _validate_date_window(start, end)
+        with self._analytics_connection() as conn:
+            rows = conn.execute(
+                _COUNT_TRANSITIONS_SQL.format(p="?"), params
+            ).fetchall()
+        return [_transition_count(row) for row in rows]
+
+    def list_attention_candidates(
+        self, *, day: date, window_start: date, limit: int
+    ) -> list[AttentionCandidate]:
+        day_iso = _validate_day(day)
+        if not isinstance(window_start, date) or isinstance(window_start, datetime):
+            raise ValueError("window_start must be a date")
+        if window_start > day:
+            raise ValueError("window_start must not be after day")
+        params = (window_start.isoformat(), day_iso, day_iso, positive_limit(limit))
+        with self._analytics_connection() as conn:
+            rows = conn.execute(_ATTENTION_SQL.format(p="?"), params).fetchall()
+        return [_attention_candidate(row) for row in rows]
+
+    def list_users_page(
+        self,
+        *,
+        query: UserPageQuery,
+        day: date,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[UserPageRow], int]:
+        """One filtered, sorted, paginated page of users plus the total.
+
+        Two statements, both in SQL, neither parameterised by a user id: the
+        Python loop this replaces loaded every eligible user and every
+        snapshot on every page load.
+        """
+        page_size, start = _validate_page_window(limit, offset)
+        page_sql, count_sql, page_params, count_params = _users_page_sql(
+            query, day=day, limit=page_size, offset=start, p="?"
+        )
+        with self._analytics_connection() as conn:
+            rows = conn.execute(page_sql, page_params).fetchall()
+            total_row = conn.execute(count_sql, count_params).fetchone()
+        return [_user_page_row(row) for row in rows], int(
+            _row_value(total_row, "total", 0) or 0
+        )
+
+    def latest_fact_date(self, *, on_or_before: date) -> date | None:
+        """The newest ``snapshot_date`` at or before the bound; one MAX() read.
+
+        ``/users`` joins yesterday's facts; before the night's job lands (or
+        while it fails) this names the day it can join instead.
+        """
+        with self._analytics_connection() as conn:
+            row = conn.execute(
+                _LATEST_FACT_DATE_SQL.format(p="?"), (_validate_day(on_or_before),)
+            ).fetchone()
+        return _latest_fact_date(row)
+
+    def sum_facts_by_user_group(
+        self, *, start: date, end: date
+    ) -> dict[str, GroupFactTotals]:
+        params = _validate_date_window(start, end)
+        with self._analytics_connection() as conn:
+            totals = conn.execute(_GROUP_TOTALS_SQL.format(p="?"), params).fetchall()
+            repeats = conn.execute(_GROUP_REPEAT_SQL.format(p="?"), params).fetchall()
+        return _group_totals(totals, repeats)
+
+    def list_active_dates(
+        self, user_ids: Sequence[int], *, start: date, end: date
+    ) -> dict[int, list[date]]:
+        chunks = _id_chunks(user_ids)
+        window = _validate_date_window(start, end)
+        result: dict[int, list[date]] = {
+            user_id: [] for chunk in chunks for user_id in chunk
+        }
+        with self._analytics_connection() as conn:
+            for chunk in chunks:
+                user_clause = f" AND user_id IN ({', '.join('?' for _ in chunk)})"
+                rows = conn.execute(
+                    _ACTIVE_DATES_SQL.format(p="?", user_clause=user_clause),
+                    [*window, *chunk],
+                ).fetchall()
+                for row in rows:
+                    result[int(_row_value(row, "user_id"))].append(
+                        date.fromisoformat(str(_row_value(row, "snapshot_date")))
+                    )
+        return result
+
+    def list_activations(
+        self, *, start: datetime, end: datetime, include_internal: bool
+    ) -> dict[int, datetime]:
+        window_start, window_end = _validate_window(start, end)
+        sql = _ACTIVATIONS_SQL.format(
+            p="?", internal="" if include_internal else _INTERNAL_EXCLUSION_SQL
+        )
+        with self._analytics_connection() as conn:
+            rows = conn.execute(
+                sql, (utc_iso(window_start), utc_iso(window_end))
+            ).fetchall()
+        return {
+            int(_row_value(row, "user_id")): _timestamp(_row_value(row, "activated_at"))
+            for row in rows
+        }
+
+    def count_activated_users(self, *, include_internal: bool) -> int:
+        sql = _COUNT_ACTIVATED_SQL.format(
+            internal="" if include_internal else _INTERNAL_EXCLUSION_SQL
+        )
+        with self._analytics_connection() as conn:
+            row = conn.execute(sql).fetchone()
+        return int(_row_value(row, "activated", 0) or 0)
+
+    def list_user_transitions(
+        self, user_id: int, *, start: date, end: date
+    ) -> list[LifecycleTransitionRow]:
+        subject = positive_user_id(user_id)
+        window = _validate_date_window(start, end)
+        with self._analytics_connection() as conn:
+            rows = conn.execute(
+                _USER_TRANSITIONS_SQL.format(p="?"), (subject, *window)
+            ).fetchall()
+        return [_transition_row(row) for row in rows]
+
+    def list_transitions_for_date(self, day: date) -> list[LifecycleTransitionRow]:
+        params = (_validate_day(day),)
+        with self._analytics_connection() as conn:
+            rows = conn.execute(
+                _TRANSITIONS_FOR_DATE_SQL.format(p="?"), params
+            ).fetchall()
+        return [_transition_row(row) for row in rows]
 
     def list_commercial_values(
         self,
@@ -1786,12 +2451,83 @@ class ValueAnalyticsStore:
             conn.executemany(sql, [_transition_values(row) for row in rows])
         return len(rows)
 
+    def replace_lifecycle_transitions(
+        self, day: date, rows: Sequence[LifecycleTransitionRow]
+    ) -> int:
+        """Make ``day``'s transition log exactly ``rows``, in one transaction.
+
+        The daily job's writer. ``append_lifecycle_transitions`` upserts the
+        users whose segment moved and touches nobody else, so a recompute
+        that finds a user back on the previous day's segment kept the first
+        run's row forever -- and ``rollup_lifecycle_day`` bakes that row into
+        the permanent rollups at expiry. The day is recomputed whole, so its
+        log is replaced whole -- for the accounts the job evaluates. Rows of
+        an admin or excluded account are left in place: the read filter only
+        hides them, so an exclusion stays reversible.
+        """
+        day_iso = _validate_day(day)
+        if any(row.snapshot_date != day for row in rows):
+            raise ValueError("every transition must belong to day")
+        with self._analytics_connection() as conn:
+            conn.execute(_REPLACE_TRANSITIONS_DELETE_SQL.format(p="?"), (day_iso,))
+            if rows:
+                conn.executemany(
+                    _UPSERT_TRANSITIONS_SQL.format(p="?"),
+                    [_transition_values(row) for row in rows],
+                )
+        return len(rows)
+
+    def requeue_days_for_recompute(self, days: Sequence[date]) -> int:
+        """Put ``days`` back on ``list_days_needing_recompute``. One statement.
+
+        A day leaves that list once its facts' ``calculated_at`` is newer than
+        its newest event's ``received_at``, and the facts upsert sets it
+        before the transitions step runs. A late-arrival recompute that then
+        fails would never be retried. Resetting the stamp to the epoch (it is
+        read by nothing but the recompute scan) makes the day due again.
+        """
+        values = sorted({_validate_day(day) for day in days})
+        if not values:
+            return 0
+        sql = _REQUEUE_RECOMPUTE_SQL.format(p="?", days=", ".join("?" for _ in values))
+        with self._analytics_connection() as conn:
+            cursor = conn.execute(sql, [_RECOMPUTE_EPOCH, *values])
+            return max(0, int(cursor.rowcount))
+
+    def backfill_transitions_from_history(self, *, now: datetime) -> int:
+        """Derive the transition log for every fact day that has none.
+
+        A startup-migration step, run between the legacy rollup and the drop
+        (``facts_migration.run_startup_migrations``), and only while
+        ``user_lifecycle_daily_snapshots`` still exists: it is a one-off for
+        the PR A history copy's days, not a second writer beside the job.
+        A day the job already wrote a log for is left alone; a day it wrote
+        none for (no one moved) derives none again, from the same facts.
+        Returns the rows inserted.
+        """
+        stamp = utc_iso(_utc(now, "now"))
+        with self._analytics_connection() as conn:
+            if not _sqlite_table_exists(conn, "user_lifecycle_daily_snapshots"):
+                return 0
+            days = [
+                str(_row_value(row, "snapshot_date"))
+                for row in conn.execute(_DAYS_WITHOUT_TRANSITIONS_SQL).fetchall()
+            ]
+            if not days:
+                return 0
+            inserted = 0
+            for sql, params in _backfill_transition_statements(
+                p="?", prev="date(cur.snapshot_date, '-1 day')", days=days
+            ):
+                cursor = conn.execute(sql, [stamp, *params])
+                inserted += max(0, int(cursor.rowcount))
+        return inserted
+
     def list_facts_for_date(self, day: date) -> list[UserDailyFact]:
         """Every fact row for one date. Used for the previous day's segments."""
         with self._analytics_connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM user_daily_facts WHERE snapshot_date = ? ORDER BY user_id",
-                (day.isoformat(),),
+                _FACTS_FOR_DATE_SQL.format(p="?"), (_validate_day(day),)
             ).fetchall()
         return [_fact_from_row(row) for row in rows]
 
@@ -1822,38 +2558,6 @@ class ValueAnalyticsStore:
                 (since.isoformat(), until.isoformat()),
             ).fetchall()
         return _recompute_days(event_rows, fact_rows)
-
-    def copy_daily_snapshot_history(self, *, since: date, now: datetime) -> int:
-        """Copy legacy ``user_lifecycle_daily_snapshots`` rows into the fact table.
-
-        Run, cost and tier columns are filled with their neutral values and
-        every copied row is ``partial``, so the UI labels the period
-        "Incomplete data" instead of charting zeros as fact (design SS6.7).
-        ``tier='unpaid'`` is a placeholder, not a claim, for the same reason.
-        ``user_group`` is read from ``users`` at the copy (D9). ``ON CONFLICT
-        DO NOTHING`` makes it both idempotent and unable to clobber a row the
-        daily job already computed. Returns the number of rows inserted.
-        """
-        stamp = utc_iso(_utc(now, "now"))
-        sql = """
-            INSERT INTO user_daily_facts (
-                snapshot_date, user_id, lifecycle_segment, lifecycle_reason_code,
-                operational_state, operational_reason_code, tier, user_group, active,
-                runs_requested, runs_completed, runs_failed, runs_cancelled,
-                operator_cost_micro, own_spend_micro, data_quality, calculated_at
-            )
-            SELECT s.snapshot_date, s.user_id, s.lifecycle_segment,
-                   s.lifecycle_reason_code, 'healthy', NULL, 'unpaid',
-                   users.user_group, 0, 0, 0, 0, 0, 0, 0, 'partial', ?
-            FROM user_lifecycle_daily_snapshots AS s
-            JOIN users ON users.id = s.user_id
-            WHERE s.snapshot_date >= ?
-            ON CONFLICT(snapshot_date, user_id) DO NOTHING
-        """
-        with self._analytics_connection() as conn:
-            cursor = conn.execute(sql, (stamp, since.isoformat()))
-            return max(0, int(cursor.rowcount))
-
 
 def build_value_analytics_store(
     analytics_base: Any | None = None,
@@ -1893,17 +2597,22 @@ def build_value_analytics_store(
 
 
 __all__ = [
+    "AttentionCandidate",
     "CommercialValueFact",
     "CurrentOperationalFacts",
     "ProjectionJob",
     "ActivityUpdate",
     "DayEventTotals",
+    "FactStateCount",
+    "GroupFactTotals",
     "RecentFactTotals",
+    "SegmentDayCount",
+    "TransitionCount",
+    "UserPageQuery",
+    "UserPageRow",
     "LifecycleTransitionRow",
     "UserActivity",
     "UserDailyFact",
-    "UserLifecycleDailySnapshot",
-    "UserValueSnapshot",
     "ValueAnalyticsStore",
     "build_value_analytics_store",
 ]

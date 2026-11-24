@@ -13,8 +13,9 @@ Usage:
 
 import json
 import logging
+import math
 import re
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, NamedTuple, Optional, Tuple
 from enum import Enum
 from datetime import datetime
 from pydantic import BaseModel, field_validator, ValidationError, ConfigDict
@@ -55,11 +56,249 @@ TOP_10_STOCKS = ["AAPL", "MSFT", "JPM", "V", "JNJ", "WMT", "PG", "AXP", "HD", "D
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,9}$")
 
 
+# The whitespace an agent's JSON plausibly wraps a ticker or an action in.
+# Deliberately not str.strip()'s default set, which also eats Unicode spaces
+# (NBSP, U+2028) and the ASCII separators \x1c-\x1f.
+_ASCII_WHITESPACE = " \t\n\r\v\f"
+
+
+def normalize_symbol(symbol: str) -> str:
+    """Canonical ticker form: ASCII whitespace trimmed, ASCII letters uppercased.
+
+    This is the one rule every decision path applies before comparing a
+    symbol with its allow-list (v1 ``LLMTradingDecision``, v2 ``ActionItem``,
+    the protocol Run API's ``OrderIn``, the backtest portfolio manager, the AI
+    Hedge Fund adapter, the Robinhood live path). It is normalization only:
+    which symbols are tradeable is still each caller's own universe, so a
+    symbol accepted on one surface can be refused on another.
+
+    A ticker is ASCII. A value that is not ASCII once trimmed is returned
+    trimmed but *not* case-folded, so it can never equal a ticker: Unicode
+    case mapping folds look-alikes into real symbols ('ıbm'.upper() == 'IBM',
+    'cſco'.upper() == 'CSCO').
+    """
+    trimmed = symbol.strip(_ASCII_WHITESPACE)
+    if not trimmed.isascii():
+        return trimmed
+    return trimmed.upper()
+
+
+def normalize_action(action: Any) -> str:
+    """Canonical action form: ASCII whitespace trimmed, ASCII letters lowercased.
+
+    The one rule for reading a model's action or order side before matching
+    it against ``TRADING_ACTIONS``: the backtest gate's strict check and the
+    loop that places trades, a pipeline's ``orders`` and ``risk_actions``, the
+    decision tape, the AI Hedge Fund adapter, the Trading Algo backtest and
+    the Robinhood live path. Each used to read the field its own way, and
+    the strict check stripping ``"buy "`` while the trade loop did not let
+    the action pass validation and then match no branch (#658).
+
+    A missing action (``None``) is ``""``; the caller decides what that means.
+    Anything else is read through ``str()``, so a number or a list can never
+    equal an action. As in ``normalize_symbol``, a value that is not ASCII
+    once trimmed is not case-folded.
+    """
+    if action is None:
+        return ""
+    trimmed = str(action).strip(_ASCII_WHITESPACE)
+    if not trimmed.isascii():
+        return trimmed
+    return trimmed.lower()
+
+
+# What an action's confidence reads as when the model leaves it out, per
+# backtest decision path. Kept apart on purpose: the default pipeline
+# instruction asks for no confidence, so the orders it produces carry 0.75 and
+# one without a qty is sized from it. Moving it to 0.5 would shrink those buys
+# by a third and stop new runs comparing with old ones.
+LLM_ACTION_DEFAULT_CONFIDENCE = 0.5  # the gate, for an ``actions`` reply
+PIPELINE_ORDER_DEFAULT_CONFIDENCE = 0.75  # a pipeline's ``orders``
+PIPELINE_RISK_DEFAULT_CONFIDENCE = 0.8  # a pipeline's ``risk_actions``
+
+
+def model_number(value: Any, default: Optional[float] = None) -> Optional[float]:
+    """A number a model wrote into its JSON reply, as a float.
+
+    A missing value (``None``, or a string of only whitespace) is ``default``.
+    A numeric string such as ``"0.4"`` is read as its number, as ``float()``
+    always read it on these paths. Anything else that is not a number -- a
+    bool, text such as ``"high"``, a list or an object -- is ``None``:
+    ``int(True) == 1`` is not what a model meant. The result is not range
+    checked and can be NaN or infinite; an int too large for a float reads
+    as infinite rather than raising ``OverflowError``.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        try:
+            return float(value)
+        except OverflowError:
+            return math.inf if value > 0 else -math.inf
+    if isinstance(value, (float, str)):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+# How a model's SELL is sized (``requested_sell_shares``), recorded on every
+# LLM run's metadata as ``llm_sell_sizing``. Until #661 the backtest gate sold
+# the whole position whatever the size; a row without the key was written
+# under that rule (``LEGACY_LLM_SELL_SIZING``). The two rules trade one reply
+# differently, so curves made under them are different experiments: the
+# leaderboard pools repeats of one rule only, and a Live month checkpointed
+# under the other is replayed rather than resumed. Change the value with the
+# rule.
+LLM_SELL_SIZING = "requested_shares"
+LEGACY_LLM_SELL_SIZING = "whole_position"
+
+
+class SellRequest(NamedTuple):
+    """What a model's SELL asks for (``sell_request``)."""
+
+    shares: Optional[float]  # None when the SELL must be skipped
+    refusal: Optional[str]  # why it was skipped
+    # The shares it asked for, for the order ledger: a finite count of 0 or
+    # more, so a refused trim records the part it wanted and a size with no
+    # count ("all", NaN, -3) records 0.
+    asked: float
+
+
+def requested_sell_shares(
+    position_size: Any,
+    size_fraction: Any,
+    held: float,
+    *,
+    lot_size: int = 1,
+) -> Tuple[Optional[float], Optional[str]]:
+    """``(shares, None)``, or ``(None, why)`` when the SELL must be skipped:
+    ``sell_request`` without the ledger's count."""
+    request = sell_request(position_size, size_fraction, held, lot_size=lot_size)
+    return request.shares, request.refusal
+
+
+def sell_request(
+    position_size: Any,
+    size_fraction: Any,
+    held: float,
+    *,
+    lot_size: int = 1,
+) -> SellRequest:
+    """Shares a model's SELL asks for, before the holding and T+1 cap it (#661).
+
+    One rule for both readers of a SELL: the backtest gate and
+    ``actions_to_executable``. Only a size the model left out, null or 0 means
+    the whole position (the convention both have always shared; blank text is
+    left out, as everywhere ``model_number`` reads a number); a size this
+    cannot use is refused, never read as "all of it":
+
+    - ``position_size`` above 0 is a share count. Where ``lot_size`` is 1 it
+      is cut to whole shares, and one under a share is refused rather than cut
+      to 0. In a lot market it is passed on as written, for the executor's own
+      lot check.
+    - With no ``position_size``, ``size_fraction`` (a pipeline risk action's
+      ``size_pct``) is a share of ``held``: above 0 and below 1 that part,
+      rounded down to whole lots; 1, or 100 and more, all of it. Without one,
+      the whole position.
+    - A bool, text that is not a number, a list, NaN, infinity or a negative
+      number in either field is refused, and so is a fraction that rounds to
+      no shares or one between 1 and 100.
+    """
+    size = model_number(position_size, 0.0)
+    if size is None or not math.isfinite(size) or size < 0:
+        return SellRequest(None, f"position_size {position_size!r} is not a share count", 0.0)
+    if size > 0:
+        if lot_size > 1:
+            return SellRequest(size, None, size)
+        if size < 1:
+            return SellRequest(
+                None, f"position_size {position_size!r} is less than one share", size
+            )
+        return SellRequest(int(size), None, int(size))
+    fraction = model_number(size_fraction, 1.0)  # absent: the whole position
+    if fraction is None or not math.isfinite(fraction) or fraction <= 0:
+        return SellRequest(
+            None, f"size_fraction {size_fraction!r} is not a share of the position", 0.0
+        )
+    if 1 < fraction < 100:
+        # A fraction (all of it) and a percentage (that share) disagree here,
+        # and no prompt stated size_pct's unit, so a model writing 25 for 25%
+        # was sold out (#690). Refused, not read either way: reading it as a
+        # percentage would silently change what 1.5 did. 100 or more is all
+        # of it on both readings. 1 is not: as a percentage it is a 1% trim.
+        # It is read as a fraction, all of it, because that is the unit the
+        # pipeline prompt states (_RISK_SIZE_RULE), and 1.0 is how a model
+        # writing fractions says "the whole position"; refusing it would
+        # break every such full exit to guard a trim that small.
+        # LLM_SELL_SIZING stays: a size_fraction comes from a pipeline's
+        # risk_actions, and neither of that marker's readers (the
+        # leaderboard's pools, a Live month's resume) runs a pipeline.
+        return SellRequest(
+            None,
+            f"size_fraction {size_fraction!r} is between 1 and 100, "
+            "where a fraction and a percentage disagree",
+            0.0,
+        )
+    if fraction >= 1:
+        return SellRequest(held, None, held)
+    # Rounded before the floor: 0.57 * 100 is 56.99999999999999 in binary
+    # floating point, and a bare floor sold 56 of the 57 shares asked for.
+    part = round(fraction * held, 9)
+    lots = math.floor(round(part / lot_size, 9))
+    if lots <= 0:
+        unit = "one share" if lot_size == 1 else f"one lot of {lot_size}"
+        return SellRequest(
+            None,
+            f"size_fraction {size_fraction!r} of {held:g} shares is less than {unit}",
+            part,
+        )
+    return SellRequest(lots * lot_size, None, lots * lot_size)
+
+
+def confidence_in_range(confidence: float) -> bool:
+    """Whether a confidence, as a float, is on the 0-1 scale every decision
+    path trades on. The one copy of the rule: ``read_confidence``,
+    ``LLMTradingDecision`` and the AI Hedge Fund adapter (after its 0-100
+    scale is divided out) all ask it."""
+    return math.isfinite(confidence) and 0.0 <= confidence <= 1.0
+
+
+def read_confidence(value: Any, default: float) -> Optional[float]:
+    """An action's 0-1 confidence, or ``None`` when it cannot be read as one.
+
+    One rule for the backtest gate and for every pipeline envelope it reads:
+    a confidence the model left out takes ``default``, and one it gave must be
+    a number from 0 to 1. ``0`` is the model saying it is not confident, not a
+    missing value. Anything else it gave -- a bool, ``"high"``, a list, NaN,
+    infinity, or a number off the scale such as ``25`` -- is ``None``: reading
+    a scale into it (``25`` as 25%) or a default over it would trade on a
+    confidence the model never stated. The range is the one
+    ``LLMTradingDecision`` enforces for external agents.
+
+    ``None`` is not "skip": the gate then reads no confidence at all, so an
+    order that does not need one (a sell, a buy with its own size) still
+    trades, and only a buy that would be sized from it is skipped.
+    """
+    number = model_number(value, default)
+    if number is None or not confidence_in_range(number):
+        return None
+    return number
+
+
 class TradingAction(str, Enum):
     """Allowed trading actions"""
     BUY = "buy"
     SELL = "sell"
     HOLD = "hold"
+
+
+# The action vocabulary as plain strings, for paths that match a normalized
+# action without building a model.
+TRADING_ACTIONS = frozenset(action.value for action in TradingAction)
 
 
 # Hard per-order share ceiling enforced by ``LLMTradingDecision``. Exposed as a
@@ -90,9 +329,7 @@ class LLMTradingDecision(BaseModel):
     @classmethod
     def validate_symbol(cls, v):
         """Normalize ticker and enforce shape (universe checked later)."""
-        if not isinstance(v, str):
-            raise ValueError(f"Symbol must be a string, got {type(v)}")
-        symbol = v.strip().upper()
+        symbol = normalize_symbol(v)
         if not _TICKER_RE.fullmatch(symbol):
             raise ValueError(f"Invalid symbol format: {v}")
         return symbol
@@ -103,7 +340,7 @@ class LLMTradingDecision(BaseModel):
         """Confidence must be 0.0 to 1.0"""
         if not isinstance(v, (int, float)):
             raise ValueError(f"Confidence must be numeric, got {type(v)}")
-        if not 0.0 <= v <= 1.0:
+        if not confidence_in_range(v):
             raise ValueError(f"Confidence {v} out of range [0.0, 1.0]")
         return float(v)
     
@@ -228,7 +465,7 @@ def validate_llm_response(
         return None
 
     allow = {
-        str(s).strip().upper()
+        normalize_symbol(str(s))
         for s in (allowed_symbols if allowed_symbols is not None else DJIA_30)
         if s
     }
@@ -388,7 +625,14 @@ def actions_to_executable(
 
         elif action_type == TradingAction.SELL:
             if symbol in positions and positions[symbol] > 0:
-                sell_shares = min(decision.position_size or positions[symbol], positions[symbol])
+                # The gate's rule (requested_sell_shares), so one SELL is sized
+                # alike on both paths. LLMTradingDecision has already held
+                # position_size to a whole count from 0 to MAX_ORDER_SHARES and
+                # carries no size_fraction, so only "0 = all of it" applies.
+                requested, _refusal = requested_sell_shares(
+                    decision.position_size, None, positions[symbol]
+                )
+                sell_shares = min(requested or 0, positions[symbol])
                 if sell_shares > 0:
                     executable.append({
                         "symbol": symbol,
@@ -632,7 +876,7 @@ Position sizing:
 - position_size must be an integer share count.
 - If price or cash is missing, use position_size 1 for BUY.
 - For HOLD, position_size must be 0.
-- For SELL, position_size should be the shares to sell if available; otherwise use 1.
+- For SELL, position_size is the number of shares to sell, at most what you hold; use 0 to sell the whole position.
 
 Confidence:
 - BUY confidence should usually be 0.65 to 0.90.
@@ -659,7 +903,7 @@ Return exactly this JSON shape:
       "symbol": "<DJIA symbol>",
       "confidence": 0.75,
       "reasoning": "<short reason using trend, momentum, RSI, or risk>",
-      "position_size": 1,
+      "position_size": <integer shares; for SELL the shares to sell, 0 for the whole position; 0 for hold>,
       "stop_loss_price": null,
       "take_profit_price": null
     }}
@@ -690,6 +934,7 @@ Run the strategy above as a DJIA portfolio trading agent on historical hourly da
 - Trade ONLY symbols listed in VALID SYMBOLS.
 - Only SELL symbols that are currently owned (see current_holdings).
 - position_size must be an integer share count; use 0 for hold.
+- For SELL, position_size is the number of shares to sell, at most what you hold; use 0 to sell the whole position.
 - Output at most 10 actions.
 - Return ONLY valid JSON. No markdown, no code fences, no text outside the JSON.
 
@@ -708,7 +953,7 @@ Return exactly this JSON shape:
       "symbol": "<DJIA symbol>",
       "confidence": 0.75,
       "reasoning": "<short reason grounded in the strategy and the snapshot>",
-      "position_size": 1,
+      "position_size": <integer shares; for SELL the shares to sell, 0 for the whole position; 0 for hold>,
       "stop_loss_price": null,
       "take_profit_price": null
     }}
@@ -721,7 +966,7 @@ Return ONLY valid JSON.
 
 def _format_valid_symbols(allowed_symbols: Optional[List[str]] = None) -> str:
     symbols = allowed_symbols if allowed_symbols is not None else DJIA_30
-    return ", ".join(str(s).strip().upper() for s in symbols if s)
+    return ", ".join(normalize_symbol(str(s)) for s in symbols if s)
 
 
 def create_safe_prompt(

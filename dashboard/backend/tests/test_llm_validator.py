@@ -14,9 +14,13 @@ import pytest
 import json
 
 from dashboard.backend.infrastructure.llm.validator import (
+    TRADING_ACTIONS,
     validate_llm_response,
     TradingAction,
-    create_safe_prompt
+    create_safe_prompt,
+    model_number,
+    normalize_action,
+    read_confidence,
 )
 
 
@@ -454,3 +458,65 @@ class TestE2EFlow:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestReadConfidence:
+    """read_confidence: one confidence rule for the backtest gate and every
+    pipeline envelope it reads."""
+
+    @pytest.mark.parametrize("value", [None, "", "   "])
+    def test_missing_confidence_takes_the_default(self, value):
+        assert read_confidence(value, 0.75) == 0.75
+
+    @pytest.mark.parametrize(
+        "value, expected",
+        [(0, 0.0), (0.0, 0.0), ("0", 0.0), (0.3, 0.3), (" 0.4 ", 0.4), (1, 1.0)],
+    )
+    def test_a_number_from_0_to_1_is_kept(self, value, expected):
+        assert read_confidence(value, 0.75) == expected
+
+    @pytest.mark.parametrize(
+        "value",
+        [False, True, "high", "50%", [], {}, [0.5], float("nan"), "NaN",
+         float("inf"), float("-inf"), 25, 1.5, -0.1,
+         pytest.param(10**400, id="int-past-float")],
+    )
+    def test_anything_else_skips_the_action(self, value):
+        assert read_confidence(value, 0.75) is None
+
+    def test_model_number_reads_an_oversized_int_as_infinite(self):
+        assert model_number(10**400) == float("inf")
+        assert model_number(-(10**400)) == float("-inf")
+        assert model_number(True) is None
+        assert model_number(None, 1.0) == 1.0
+
+
+class TestNormalizeAction:
+    """normalize_action: one reading of a model's action for every path that
+    matches it against TRADING_ACTIONS (#658)."""
+
+    @pytest.mark.parametrize(
+        "value, expected",
+        [("buy", "buy"), ("buy ", "buy"), ("  BUY\n", "buy"), ("\tSell\r", "sell"),
+         ("Hold", "hold"), (" stop_loss\n", "stop_loss")],
+    )
+    def test_ascii_whitespace_is_trimmed_and_case_folded(self, value, expected):
+        assert normalize_action(value) == expected
+
+    def test_a_missing_action_is_empty_for_the_caller_to_read(self):
+        assert normalize_action(None) == ""
+
+    @pytest.mark.parametrize(
+        "value", [1, ["buy"], {"a": "buy"}, True, "Buy.", "buy_more", "long"]
+    )
+    def test_anything_else_never_equals_an_action(self, value):
+        assert normalize_action(value) not in TRADING_ACTIONS
+
+    @pytest.mark.parametrize("value", ["buy ", " sell", "buy\x1c"])
+    def test_unicode_whitespace_is_not_trimmed(self, value):
+        # The same set normalize_symbol trims, so one order's symbol and
+        # action are never held to different rules.
+        assert normalize_action(value) not in TRADING_ACTIONS
+
+    def test_trading_actions_is_the_enum(self):
+        assert TRADING_ACTIONS == {action.value for action in TradingAction}

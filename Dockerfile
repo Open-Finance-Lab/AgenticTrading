@@ -5,8 +5,12 @@ WORKDIR /app
 # Copy requirements
 COPY requirements.txt requirements-ai-hedge-fund.txt requirements-tradingagents.txt ./
 
-# Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install dependencies. requirements.txt pins the whole tree (it is generated
+# from requirements.in), so --no-deps installs exactly that set and nothing
+# newer. If a pin is missing, pip check fails the build rather than letting pip
+# resolve the gap to whatever release is newest on deploy day.
+RUN pip install --no-cache-dir --no-deps -r requirements.txt \
+    && pip check
 
 # Keep virattt/ai-hedge-fund and its LangChain graph isolated from ATL's main
 # dependency set. The adapter invokes this interpreter over a JSON subprocess
@@ -17,6 +21,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # venv must run on 3.12 even though ATL itself stays on 3.13. uv installs
 # a managed 3.12 under /opt/uv-python; the venv keeps an absolute reference
 # to it, so uninstalling the uv build tool afterwards is safe.
+#
+# The ai-hedge-fund venv's second import is its bridge's Credits meter
+# (infrastructure/ai_hedge_fund/bridge.py:_usage_meter).
+# Missing, every decision still runs but bills its reservation ceiling, so an
+# upstream dependency drift fails the build instead of overcharging quietly.
 #
 # TradingAgents gets a second venv in the same layer. It declares >=3.10 and
 # has no cp313 problem of its own -- it reuses 3.12 because the interpreter is
@@ -31,6 +40,7 @@ RUN pip install --no-cache-dir uv \
     && uv pip install --python /opt/ai-hedge-fund-venv \
        -r requirements-ai-hedge-fund.txt \
     && /opt/ai-hedge-fund-venv/bin/python -c "from src.main import run_hedge_fund" \
+    && /opt/ai-hedge-fund-venv/bin/python -c "from langchain_core.callbacks import BaseCallbackHandler; from langchain_core.tracers.context import register_configure_hook" \
     && uv venv --python 3.12 /opt/tradingagents-venv \
     && uv pip install --python /opt/tradingagents-venv \
        -r requirements-tradingagents.txt \

@@ -601,10 +601,12 @@ class TradingAgentsRuntime:
         *,
         runner: Optional[TradingAgentsSubprocessRunner] = None,
         environment: Optional[Mapping[str, str]] = None,
+        billing: Optional[Any] = None,
     ):
         self.config = normalize_runtime_config(
             TRADINGAGENTS_RUNTIME_TYPE, config or {}
         )
+        self.billing = billing
         self.environment = dict(os.environ if environment is None else environment)
         # The runner reads the *same* environment this runtime resolved its
         # gateway from. Left to its own default it read os.environ

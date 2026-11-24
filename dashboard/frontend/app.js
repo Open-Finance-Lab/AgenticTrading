@@ -303,7 +303,7 @@ const POST_TRADE_PRESET_KEY = 'post_trade_analysis';
 // Instruction row once the server confirms the run used it.
 // tests/test_agent_starter_defaults.py pins the two copies together.
 const DEFAULT_STARTER_INSTRUCTION =
-  'Manage this account like a disciplined portfolio manager. The goal is to keep pace with, and ideally beat, simply buying equal amounts of every listed stock and holding them.\n\n1. Stay invested. At the start (all cash), buy roughly equal dollar amounts of as many listed stocks as the cash allows, keeping about 3% in cash. Skip a stock if one share costs more than a third of the account.\n2. Holding is the default. Most hours the right move is to change nothing. Never trade on small moves.\n3. Sell a stock only when its trend has clearly broken: price at least 2% below its 20-hour average (sma20) AND momentum (macd) below its signal line (macd_signal). A sell always closes the whole position.\n4. Reinvest cash quickly. When cash is above 10% of the account, buy the stock you own the least of among those with price above sma20, macd above macd_signal and RSI below 75. If none qualifies, buy the stock you own the least of anyway.\n5. Keep any one stock under 35% of the account, and do not add to a stock that is already above 25%.\n6. Do not buy back a stock you sold in the last day, or sell one you bought in the last day (check recent_trades).\n7. An indicator showing 0 does not have enough history yet: ignore it.\n\nOrders: list each stock at most once, use whole-share quantities, and keep the total cost of all buys within available cash. If you make no trades, return one "hold" order for any listed stock. Keep each reason under 15 words.';
+  'Manage this account like a disciplined portfolio manager. The goal is to keep pace with, and ideally beat, simply buying equal amounts of every listed stock and holding them.\n\n1. Stay invested. At the start (all cash), buy roughly equal dollar amounts of as many listed stocks as the cash allows, keeping about 3% in cash. Skip a stock if one share costs more than a third of the account.\n2. Holding is the default. Most hours the right move is to change nothing. Never trade on small moves.\n3. Sell a stock only when its trend has clearly broken: price at least 2% below its 20-hour average (sma20) AND momentum (macd) below its signal line (macd_signal). A sell should close the whole position: set its qty to all the shares you hold.\n4. Reinvest cash quickly. When cash is above 10% of the account, buy the stock you own the least of among those with price above sma20, macd above macd_signal and RSI below 75. If none qualifies, buy the stock you own the least of anyway.\n5. Keep any one stock under 35% of the account, and do not add to a stock that is already above 25%.\n6. Do not buy back a stock you sold in the last day, or sell one you bought in the last day (check recent_trades).\n7. An indicator showing 0 does not have enough history yet: ignore it.\n\nOrders: list each stock at most once, use whole-share quantities, and keep the total cost of all buys within available cash. If you make no trades, return one "hold" order for any listed stock. Keep each reason under 15 words.';
 window.DEFAULT_STARTER_INSTRUCTION = DEFAULT_STARTER_INSTRUCTION;
 
 function defaultAgentProvisionGuardKey() {
@@ -752,7 +752,7 @@ window.AGENT_SHELF_LABELS = MARKET_LABELS;
  *
  * A hosted runtime's model is deliberately absent: it is a property of the
  * runtime, not a user choice, and syncBacktestModelFieldMode already renders
- * that case as "<runtime> — hosted runtime" (hostedRuntimeLabel). */
+ * that case as "<runtime> — hosted runtime, ..." (hostedRuntimeLabel). */
 const SUPPORTED_MODELS = [
   { slug: 'anthropic/claude-haiku-4-5', label: 'Claude Haiku 4.5', vendor: 'anthropic' },
   { slug: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet 4.6', vendor: 'anthropic' },
@@ -2594,7 +2594,7 @@ function syncBacktestModelFieldMode() {
       // AI Hedge Fund as well as TradingAgents. Nothing caught it because no
       // test executed this function; the only reference to it was a substring
       // check on its name.
-      ? `${hostedRuntimeLabel(runBacktestModalAgent)} — hosted runtime`
+      ? `${hostedRuntimeLabel(runBacktestModalAgent)} — hosted runtime, billed to your ATL Credits`
       : 'Rule-based — simulated practice data, no AI involved';
   }
   if (billingGroup) billingGroup.hidden = isHostedRuntime || isRuleBased;
@@ -11129,6 +11129,12 @@ async function runBacktest() {
         alert('Please create or select an agent first.');
         return;
     }
+    if ((activeAgent.runtime_type || 'pipeline') !== 'pipeline' && !isSignedIn()) {
+        // The route refuses a guest's hosted run with 401 (it bills ATL
+        // Credits); say so before the agent and progress panel start.
+        showModalError('Sign in to run a hosted agent backtest: it is billed to your ATL Credits.');
+        return;
+    }
 
     // Before activateAgent, which is the first network call: a universe this
     // runtime cannot accept is refused while the modal is still open and the
@@ -11248,8 +11254,13 @@ async function runBacktest() {
                 fill_policy: 'next_source_bar_open',
             },
         decisionSource,
-        billingMode: isRuleBasedDecision ? null : selectedBillingMode,
-        providerId: isRuleBasedDecision || selectedBillingMode === 'platform_credits'
+        // A hosted runtime bills ATL Credits server-side (the route refuses
+        // BYOK), though the modal sends no billing_mode for it.
+        billingMode: isRuleBasedDecision
+            ? null
+            : (isHostedRuntime ? 'platform_credits' : selectedBillingMode),
+        providerId: isRuleBasedDecision || isHostedRuntime
+            || selectedBillingMode === 'platform_credits'
             ? null
             : selectedProviderId,
         marketDataLabel: isIFind
@@ -11478,6 +11489,7 @@ function viewParamForNavState(state) {
     if (state.page === 'playground') {
         if (state.playgroundTab === 'backtest') return 'backtest';
         if (state.playgroundTab === 'paper') return 'paper';
+        if (state.playgroundTab === 'portfolio-management') return 'portfolio-management';
         return 'agents';
     }
     if (state.page === 'competition') {
@@ -11769,10 +11781,16 @@ function showPlaygroundPanel(tab) {
     const backtest = document.querySelector('.playground-backtest-panel')
       || document.querySelector('.main-container');
     const paper = document.getElementById('paperTradingView');
+    const portfolioManagement = document.getElementById('playgroundPortfolioManagementPanel');
 
     if (agents) agents.style.display = tab === 'agents' ? 'block' : 'none';
     if (backtest) backtest.style.display = tab === 'backtest' ? 'grid' : 'none';
     if (paper) paper.style.display = tab === 'paper' ? 'block' : 'none';
+    if (portfolioManagement) portfolioManagement.style.display = tab === 'portfolio-management' ? 'block' : 'none';
+
+    // The recorded demo owns document keys and timers while it shows; any other
+    // tab must release them (js/portfolio-management.js).
+    if (tab !== 'portfolio-management') window.PortfolioManagementDemo?.hide();
 
     if (tab === 'backtest') {
         currentMode = 'backtest';
@@ -11782,6 +11800,9 @@ function showPlaygroundPanel(tab) {
     } else if (tab === 'paper') {
         currentMode = 'paper';
         loadPaperTradingData();
+    } else if (tab === 'portfolio-management') {
+        currentMode = 'portfolio-management';
+        showPortfolioManagementDemo(portfolioManagement);
     } else {
         currentMode = 'agents';
         // Cache-only repaint so the panel is not blank while agents load;
@@ -11799,6 +11820,28 @@ function showPlaygroundPanel(tab) {
     }
 
     persistNavigation();
+}
+
+// The Portfolio Management tab plays a fixed recording (js/portfolio-management.js).
+// A script that failed to load or a throw on first show must leave a visible
+// message, not an empty panel that looks like a slow load.
+function showPortfolioManagementDemo(panel) {
+    if (!panel) return;
+    // A first show() that throws after attachShadow leaves a root with no <slot>, which
+    // hides the panel's own text, so the message goes wherever the panel renders.
+    const showFailure = () => {
+        (panel.shadowRoot || panel).textContent = 'Portfolio Management did not load. Reload the page to try again.';
+    };
+    if (!window.PortfolioManagementDemo) {
+        showFailure();
+        return;
+    }
+    try {
+        window.PortfolioManagementDemo.show(panel);
+    } catch (err) {
+        console.error('Portfolio Management demo failed to show', err);
+        showFailure();
+    }
 }
 
 function showCompetitionPanel(tab) {
@@ -11955,9 +11998,11 @@ function navigateToPage(page, options = {}) {
     hide(leaderboardView);
     hide(document.getElementById('liveLeaderboardView'));
     hide(document.getElementById('playgroundAgentsPanel'));
+    hide(document.getElementById('playgroundPortfolioManagementPanel'));
     hide(document.getElementById('researchWorkbenchView'));
     hide(document.getElementById('competitionParticipantsPanel'));
     hide(document.getElementById('competitionAboutPanel'));
+    if (page !== 'playground') window.PortfolioManagementDemo?.hide();
 
     if (page === 'home') {
         currentMode = 'home';

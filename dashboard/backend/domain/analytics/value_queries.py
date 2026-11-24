@@ -14,22 +14,29 @@ from .lifecycle import (
     LifecycleSegment,
     OperationalResult,
     OperationalState,
-    is_lifecycle_activity,
+    activation_cohort_week,
+    calculate_lifecycle,
+    operational_reason,
+    operational_result_from_code,
 )
+from .lifecycle_reads import build_lifecycle_inputs
 from .metrics import AnalyticsMetricFilters
 from .query_service import (
     AnalyticsQueryService,
     AnalyticsQueryStore,
     AnalyticsUserProfile,
     FailureCategoryCount,
+    _warn_read_failed,
+    landed_fact_day,
 )
 from .repository import analytics_store
 from .repository_common import positive_limit, positive_user_id
-from .usage_cost import atl_cost_micro
 from .value_repository import (
+    MAX_USER_BATCH,
     CommercialValueFact,
-    UserLifecycleDailySnapshot,
-    UserValueSnapshot,
+    GroupFactTotals,
+    UserActivity,
+    UserPageQuery,
     build_value_analytics_store,
 )
 from dashboard.backend.domain.user_groups import (
@@ -61,7 +68,6 @@ _COMMERCIAL_TIERS: tuple[CommercialTier, ...] = (
     "invested",
     "high_value",
 )
-_TIER_RANK = {tier: rank for rank, tier in enumerate(_COMMERCIAL_TIERS)}
 _MOVEMENT_WINDOWS: dict[str, tuple[int, Literal["day", "week", "month"]]] = {
     "5d": (5, "day"),
     "1w": (7, "day"),
@@ -79,22 +85,13 @@ bare literal, which is how the two could drift apart unnoticed.
 _MAX_HISTORY_SCAN_DAYS = max(
     MAX_VALUE_RANGE_DAYS, *(days for days, _granularity in _MOVEMENT_WINDOWS.values())
 )
-"""Widest span of per-user daily rows one lifecycle request may scan.
+"""Widest span of daily fact and rollup rows one lifecycle request may read.
 
 `MAX_VALUE_RANGE_DAYS` bounds the *filter* range, but the movement chart reads a
 window of its own, so the scan is the wider of the two -- 365 days today, double
 the filter cap. Derived rather than written down so that adding a longer
-movement range cannot silently widen every user's scan.
+movement range cannot silently widen the scan.
 """
-
-_PRIORITY_RANK = {
-    "blocked": 0,
-    "needs_attention": 1,
-    "healthy_at_risk": 2,
-    "healthy_onboarding": 3,
-    "none": 4,
-}
-
 
 def _utc(value: datetime, field_name: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
@@ -116,13 +113,6 @@ def _period_start(value: date, granularity: Literal["day", "week", "month"]) -> 
     if granularity == "week":
         return _week_start(value)
     return value.replace(day=1)
-
-
-def _parse_timestamp(value: object) -> datetime:
-    parsed = datetime.fromisoformat(str(value))
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
 
 
 def _validate_dates(start: date, end: date) -> tuple[date, date]:
@@ -297,6 +287,20 @@ class OperationalAnalyticsResponse(BaseModel):
     availability: SectionAvailability
 
 
+class OperationalReasonCount(BaseModel):
+    """One blocking or attention reason and how many users carried it.
+
+    Service-level only in PR B (design §9: PR D puts `top_operational_reasons`
+    on OperationalAnalyticsResponse in the contract re-cut).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reason_code: str
+    reason: str
+    users: int = Field(ge=0)
+
+
 class UserGroupSummary(BaseModel):
     """Display-safe value metrics for one canonical account-source group."""
 
@@ -335,7 +339,6 @@ class UserValueFilters(BaseModel):
     last_meaningful_activity_from: datetime | None = None
     last_meaningful_activity_to: datetime | None = None
     priority: bool = False
-    legacy_status: str | None = None
     include_internal: bool = False
 
     @field_validator("q")
@@ -362,15 +365,6 @@ class UserValueFilters(BaseModel):
             and self.last_meaningful_activity_to < self.last_meaningful_activity_from
         ):
             raise ValueError("last meaningful activity range is reversed")
-        legacy = self.legacy_status
-        if legacy is not None and legacy not in {
-            "blocked",
-            "needs_attention",
-            "dormant",
-            "onboarding",
-            "active",
-        }:
-            raise ValueError("legacy_status is unsupported")
         return self
 
 
@@ -416,39 +410,18 @@ class ValueUserProfile(AnalyticsUserProfile):
     recent_lifecycle_transitions: Sequence[LifecycleTransition]
 
 
-def _lifecycle(snapshot: UserValueSnapshot) -> LifecycleResult:
-    return LifecycleResult(
-        segment=snapshot.lifecycle_segment,
-        reason_code=snapshot.lifecycle_reason_code,
-        reason=snapshot.lifecycle_reason,
-        evidence=tuple(snapshot.lifecycle_evidence),
-        activated_at=snapshot.activated_at,
-        last_meaningful_activity_at=snapshot.last_meaningful_activity_at,
-        inactive_days=snapshot.inactive_days,
-        active_days_30d=snapshot.active_days_30d,
-        successful_backtests_30d=snapshot.successful_backtests_30d,
-        calculated_at=snapshot.calculated_at,
-    )
-
-
-def _operational(snapshot: UserValueSnapshot) -> OperationalResult:
-    return OperationalResult(
-        state=snapshot.operational_state,
-        reason_code=snapshot.operational_reason_code,
-        reason=snapshot.operational_reason,
-        evidence=tuple(snapshot.operational_evidence),
-        calculated_at=snapshot.calculated_at,
-    )
-
-
-def _priority_group(snapshot: UserValueSnapshot) -> PriorityGroup:
-    if snapshot.operational_state == "blocked":
+def _priority_group(
+    operational_state: str, lifecycle_segment: str | None
+) -> PriorityGroup:
+    """Yesterday's fact values -> group; the same rule as ``_users_page_sql``'s
+    priority predicate and sort, so a row agrees with where SQL placed it."""
+    if operational_state == "blocked":
         return "blocked"
-    if snapshot.operational_state == "needs_attention":
+    if operational_state == "needs_attention":
         return "needs_attention"
-    if snapshot.lifecycle_segment == "at_risk":
+    if lifecycle_segment == "at_risk":
         return "healthy_at_risk"
-    if snapshot.lifecycle_segment == "onboarding":
+    if lifecycle_segment == "onboarding":
         return "healthy_onboarding"
     return "none"
 
@@ -464,33 +437,30 @@ def _all_users(user_store: Any) -> list[dict[str, Any]]:
         offset += len(page)
 
 
-def _event_utc(value: object) -> datetime:
-    """Normalize an event timestamp without trusting a naive stored value."""
-
-    if isinstance(value, datetime):
-        if value.tzinfo is None or value.utcoffset() is None:
-            return value.replace(tzinfo=UTC)
-        return value.astimezone(UTC)
-    return _parse_timestamp(value)
-
-
-def _safe_cost_micro_usd(event: object) -> int:
-    """Read only the bounded platform-cost field used by the summary.
-
-    Server analytics events are validated on write, but this endpoint also
-    reads legacy rows. A malformed or negative value must not make an admin
-    summary fail or turn into a negative cost.
-    """
-
-    if getattr(event, "event_name", None) != "model_usage_recorded":
-        return 0
-    properties = getattr(event, "properties", {})
-    if not isinstance(properties, dict):
-        return 0
-    value = properties.get("cost_micro_usd")
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        return 0
-    return atl_cost_micro(getattr(event, "billing_mode", None), properties)
+def _transition_models(
+    counts: Counter[tuple[str, str]],
+    partial: set[tuple[str, str]],
+    *,
+    start: date,
+    end: date,
+) -> list[LifecycleTransition]:
+    """Window-level transition totals, largest first, stamped with the window."""
+    return [
+        LifecycleTransition(
+            from_segment=from_segment,
+            to_segment=to_segment,
+            users=count,
+            period_start=start,
+            period_end=end,
+            data_quality=(
+                "partial" if (from_segment, to_segment) in partial else "complete"
+            ),
+        )
+        for (from_segment, to_segment), count in sorted(
+            counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+    ]
 
 
 class ValueAnalyticsQueryService:
@@ -511,9 +481,18 @@ class ValueAnalyticsQueryService:
         self.user_store = user_store
         self.value_store = value_store or build_value_analytics_store(store)
         self.query_store = query_store or AnalyticsQueryStore(store)
+        # A defaulted legacy service shares this service's value store, so the
+        # profile's axes and fact sums read the stores this service was given.
         self.legacy_service = legacy_service or AnalyticsQueryService(
             store=store,
             user_store=user_store,
+            value_store=self.value_store,
+        )
+        self._stale_fact_warnings: set[tuple[date, date | None]] = set()
+
+    def _landed_fact_day(self, yesterday: date) -> date | None:
+        return landed_fact_day(
+            self.value_store, yesterday=yesterday, warned=self._stale_fact_warnings
         )
 
     def _eligible_users(self, *, include_internal: bool) -> list[dict[str, Any]]:
@@ -526,18 +505,6 @@ class ValueAnalyticsQueryService:
     @staticmethod
     def _ids(users: Sequence[dict[str, Any]]) -> list[int]:
         return [positive_user_id(user["id"]) for user in users]
-
-    def _current(
-        self,
-        users: Sequence[dict[str, Any]],
-    ) -> dict[int, UserValueSnapshot]:
-        result: dict[int, UserValueSnapshot] = {}
-        ids = self._ids(users)
-        for offset in range(0, len(ids), 500):
-            result.update(
-                self.value_store.list_current_snapshots(ids[offset : offset + 500])
-            )
-        return result
 
     def _commercial(
         self,
@@ -595,31 +562,12 @@ class ValueAnalyticsQueryService:
             ],
         )
 
-    def _daily(
-        self,
-        user_ids: Sequence[int],
-        *,
-        start: date,
-        end: date,
-    ) -> list[UserLifecycleDailySnapshot]:
-        rows: list[UserLifecycleDailySnapshot] = []
-        for offset in range(0, len(user_ids), 500):
-            rows.extend(
-                self.value_store.list_daily_snapshots(
-                    start=start,
-                    end=end,
-                    user_ids=user_ids[offset : offset + 500],
-                )
-            )
-        return rows
-
     def _history(
         self,
-        user_ids: Sequence[int],
         *,
         start: date,
         end: date,
-        use_anonymous_rollups: bool,
+        yesterday: date,
         movement_start: date | None = None,
         movement_range: str = "5d",
     ) -> tuple[
@@ -628,6 +576,15 @@ class ValueAnalyticsQueryService:
         list[LifecycleTransition],
         SectionAvailability,
     ]:
+        """Population history from ``user_daily_facts`` and ``lifecycle_transitions``.
+
+        Both are grouped in SQL, so the read does not grow with the user table.
+        Days the facts table no longer holds fall back to the anonymous
+        lifecycle rollups -- always: facts hold no internal accounts, exactly
+        like the rollups, so the internal toggle has nothing to keep out of
+        the fallback. Facts exist only through ``yesterday``, so coverage is
+        judged against that day rather than against ``end``.
+        """
         if movement_range not in _MOVEMENT_WINDOWS:
             raise ValueError("unsupported lifecycle movement range")
         window_days, granularity = _MOVEMENT_WINDOWS[movement_range]
@@ -638,19 +595,20 @@ class ValueAnalyticsQueryService:
             min(start, selected_movement_start),
             end - timedelta(days=_MAX_HISTORY_SCAN_DAYS),
         )
-        rows = self._daily(
-            user_ids,
-            start=history_start - timedelta(days=1),
-            end=end,
-        )
-        by_date: dict[date, list[UserLifecycleDailySnapshot]] = defaultdict(list)
-        for row in rows:
-            by_date[row.snapshot_date].append(row)
-        rollups = (
-            self.query_store.rollups.list_rollups(start=history_start, end=end)
-            if use_anonymous_rollups
-            else []
-        )
+        daily_counts: dict[date, dict[LifecycleSegment, int]] = {}
+        daily_quality: dict[date, str] = {}
+        for row in self.value_store.count_segments_by_date(start=history_start, end=end):
+            counts = daily_counts.setdefault(
+                row.snapshot_date, {segment: 0 for segment in _LIFECYCLE_SEGMENTS}
+            )
+            counts[row.lifecycle_segment] = row.users
+            if row.partial_rows:
+                daily_quality[row.snapshot_date] = "partial"
+            else:
+                daily_quality.setdefault(row.snapshot_date, "complete")
+        direct_dates = set(daily_counts)
+
+        rollups = self.query_store.rollups.list_rollups(start=history_start, end=end)
         rollup_counts: dict[date, dict[LifecycleSegment, int]] = defaultdict(dict)
         rollup_quality: dict[date, str] = {}
         for row in rollups:
@@ -661,20 +619,6 @@ class ValueAnalyticsQueryService:
                 rollup_quality[row.rollup_date] = "partial"
             else:
                 rollup_quality.setdefault(row.rollup_date, "complete")
-
-        daily_counts: dict[date, dict[LifecycleSegment, int]] = {}
-        daily_quality: dict[date, str] = {}
-        direct_dates = {day for day in by_date if history_start <= day < end}
-        for day in direct_dates:
-            counts = Counter(row.lifecycle_segment for row in by_date[day])
-            daily_counts[day] = {
-                segment: int(counts.get(segment, 0)) for segment in _LIFECYCLE_SEGMENTS
-            }
-            daily_quality[day] = (
-                "partial"
-                if any(row.data_quality == "partial" for row in by_date[day])
-                else "complete"
-            )
         for day, counts in rollup_counts.items():
             if day not in direct_dates:
                 daily_counts[day] = {
@@ -686,9 +630,8 @@ class ValueAnalyticsQueryService:
         weekly: list[WeeklyLifecycleCount] = []
         by_week: dict[date, list[date]] = defaultdict(list)
         for day in daily_counts:
-            if not start <= day < end:
-                continue
-            by_week[_week_start(day)].append(day)
+            if start <= day < end:
+                by_week[_week_start(day)].append(day)
         for week, dates in sorted(by_week.items()):
             latest = max(dates)
             weekly.append(
@@ -716,18 +659,10 @@ class ValueAnalyticsQueryService:
 
         transition_counts: Counter[tuple[str, str]] = Counter()
         transition_partial: set[tuple[str, str]] = set()
-        by_user_date = {(row.user_id, row.snapshot_date): row for row in rows}
-        for row in rows:
-            if not start <= row.snapshot_date < end:
-                continue
-            previous = by_user_date.get(
-                (row.user_id, row.snapshot_date - timedelta(days=1))
-            )
-            if previous is None or previous.lifecycle_segment == row.lifecycle_segment:
-                continue
-            key = (previous.lifecycle_segment, row.lifecycle_segment)
-            transition_counts[key] += 1
-            if previous.data_quality == "partial" or row.data_quality == "partial":
+        for row in self.value_store.count_transitions(start=start, end=end):
+            key = (row.from_segment, row.to_segment)
+            transition_counts[key] += row.users
+            if row.partial_rows:
                 transition_partial.add(key)
         for row in rollups:
             if (
@@ -740,24 +675,9 @@ class ValueAnalyticsQueryService:
             transition_counts[key] += row.value_count
             if row.outcome == "partial":
                 transition_partial.add(key)
-        transitions = [
-            LifecycleTransition(
-                from_segment=from_segment,
-                to_segment=to_segment,
-                users=count,
-                period_start=start,
-                period_end=end,
-                data_quality=(
-                    "partial"
-                    if (from_segment, to_segment) in transition_partial
-                    else "complete"
-                ),
-            )
-            for (from_segment, to_segment), count in sorted(
-                transition_counts.items(),
-                key=lambda item: (-item[1], item[0]),
-            )
-        ]
+        transitions = _transition_models(
+            transition_counts, transition_partial, start=start, end=end
+        )
         coverage = sorted(day for day in daily_counts if start <= day < end)
         if not coverage:
             availability = SectionAvailability(
@@ -768,7 +688,7 @@ class ValueAnalyticsQueryService:
             partial = (
                 any(daily_quality[day] == "partial" for day in coverage)
                 or coverage[0] > start
-                or coverage[-1] < end - timedelta(days=1)
+                or coverage[-1] < min(end - timedelta(days=1), yesterday)
             )
             availability = SectionAvailability(
                 available=True,
@@ -787,25 +707,56 @@ class ValueAnalyticsQueryService:
         movement_range: str = "5d",
         now: datetime | None = None,
     ) -> LifecycleAnalyticsResponse:
+        """Segment counts are as of the latest landed fact day (design §6.3, §6.10).
+
+        That is yesterday once the night's job lands; until then, or while it
+        fails, the day before, labelled ``stale`` and ``partial`` rather than
+        read as an empty population. Fact rows hold no internal or excluded
+        accounts, so ``include_internal`` widens only the activation and paid
+        headlines, which read ``user_activity`` and the ledger. History always
+        falls back to the anonymous rollups for days without facts.
+        """
         start, end = _validate_dates(start, end)
         if movement_range not in _MOVEMENT_WINDOWS:
             raise ValueError("unsupported lifecycle movement range")
         window_days, _granularity = _MOVEMENT_WINDOWS[movement_range]
         movement_start = end - timedelta(days=window_days)
         current_time = _utc(now or datetime.now(UTC), "now")
-        users = self._eligible_users(include_internal=include_internal)
-        current = self._current(users)
-        counts = Counter(snapshot.lifecycle_segment for snapshot in current.values())
+        yesterday = current_time.date() - timedelta(days=1)
+        facts_day = self._landed_fact_day(yesterday)
+        cells = self.value_store.count_states_for_date(facts_day) if facts_day else []
+        stale = bool(cells) and facts_day != yesterday
         segment_counts = {
-            segment: int(counts.get(segment, 0)) for segment in _LIFECYCLE_SEGMENTS
+            segment: sum(
+                cell.users for cell in cells if cell.lifecycle_segment == segment
+            )
+            for segment in _LIFECYCLE_SEGMENTS
         }
         availability: dict[str, SectionAvailability] = {
             "current": SectionAvailability(
-                available=bool(current) or not users,
-                status="ready" if len(current) == len(users) else "building",
+                available=True,
+                stale=stale,
+                status=(
+                    "building" if not cells else "partial" if stale else "ready"
+                ),
+                coverage_start=facts_day if cells else None,
+                coverage_end=facts_day if cells else None,
             )
         }
         try:
+            activated_users = self.value_store.count_activated_users(
+                include_internal=include_internal
+            )
+        except Exception as exc:
+            _warn_read_failed("lifecycle_activation", exc)
+            activated_users = 0
+            availability["current"] = SectionAvailability(
+                available=bool(cells),
+                stale=stale,
+                status="partial",
+            )
+        try:
+            users = self._eligible_users(include_internal=include_internal)
             commercial = self._commercial(users, start=start, end=end)
             paid = sum(
                 fact.lifetime_net_purchased_micro > 0 for fact in commercial.values()
@@ -814,7 +765,8 @@ class ValueAnalyticsQueryService:
                 available=True,
                 status="ready",
             )
-        except Exception:
+        except Exception as exc:
+            _warn_read_failed("lifecycle_commercial", exc)
             paid = 0
             availability["commercial"] = SectionAvailability(
                 available=False,
@@ -822,14 +774,14 @@ class ValueAnalyticsQueryService:
             )
         try:
             weekly, movement, transitions, history_availability = self._history(
-                self._ids(users),
                 start=start,
                 end=end,
-                use_anonymous_rollups=not include_internal,
+                yesterday=yesterday,
                 movement_start=movement_start,
                 movement_range=movement_range,
             )
-        except Exception:
+        except Exception as exc:
+            _warn_read_failed("lifecycle_history", exc)
             weekly, movement, transitions = [], [], []
             history_availability = SectionAvailability(
                 available=False,
@@ -839,9 +791,7 @@ class ValueAnalyticsQueryService:
         return LifecycleAnalyticsResponse(
             as_of=current_time,
             headline=LifecycleHeadline(
-                activated_users=sum(
-                    snapshot.activated_at is not None for snapshot in current.values()
-                ),
+                activated_users=activated_users,
                 core_users=segment_counts["core"],
                 at_risk_users=segment_counts["at_risk"],
                 paid_users=paid,
@@ -854,27 +804,6 @@ class ValueAnalyticsQueryService:
             transitions=transitions,
             availability=availability,
         )
-
-    def _retention_quality(
-        self,
-        rows: Sequence[UserLifecycleDailySnapshot],
-        *,
-        user_ids: Sequence[int],
-        start: date,
-        end: date,
-    ) -> Literal["complete", "partial"]:
-        selected = [row for row in rows if start <= row.snapshot_date < end]
-        expected = {
-            (user_id, start + timedelta(days=offset))
-            for user_id in user_ids
-            for offset in range((end - start).days)
-        }
-        observed = {(row.user_id, row.snapshot_date) for row in selected}
-        if expected - observed or any(
-            row.data_quality == "partial" for row in selected
-        ):
-            return "partial"
-        return "complete"
 
     @staticmethod
     def _summary_cell(
@@ -907,52 +836,69 @@ class ValueAnalyticsQueryService:
     ) -> RetentionAnalyticsResponse:
         start, end = _validate_dates(start, end)
         current_time = _utc(now or datetime.now(UTC), "now")
-        users = self._eligible_users(include_internal=include_internal)
-        current = self._current(users)
         cohort_start = _week_start(start)
+        # Every Monday below ``end`` is a cohort week, so the last one is the
+        # Monday of the window's final day; its members activated before the
+        # next Monday.
+        # Cohorts are always the facts-eligible population: user_daily_facts
+        # holds no internal or excluded account, so admitting one under
+        # ``include_internal`` would count it eligible and never retained,
+        # deflating every rate it touched. The flag is accepted and ignored.
+        activations = self.value_store.list_activations(
+            start=_day_start(cohort_start),
+            end=_day_start(_week_start(end - timedelta(days=1)) + timedelta(days=7)),
+            include_internal=False,
+        )
         cohort_users: dict[date, list[int]] = defaultdict(list)
-        for user_id, snapshot in current.items():
-            if snapshot.activated_at is None:
-                continue
-            week = _week_start(snapshot.activated_at.date())
+        for user_id, activated_at in activations.items():
+            week = activation_cohort_week(activated_at)
             if cohort_start <= week < end:
                 cohort_users[week].append(user_id)
         ids = sorted(
-            {user_id for values in cohort_users.values() for user_id in values}
+            {user_id for members in cohort_users.values() for user_id in members}
         )
-        activity_by_user: dict[int, list[datetime]] = defaultdict(list)
-        if ids:
-            activity_end = min(_day_start(end + timedelta(days=35)), current_time)
-            events = self.query_store.rollups.list_events(
-                start=_day_start(cohort_start),
-                end=activity_end + timedelta(microseconds=1),
-                include_internal=True,
-            )
-            id_set = set(ids)
-            for event in events:
-                if event.user_id in id_set and is_lifecycle_activity(event):
-                    activity_by_user[event.user_id].append(event.occurred_at)
-            for offset in range(0, len(ids), 500):
-                chunk = ids[offset : offset + 500]
-                credit_activity = self.value_store.list_credit_activity(
-                    chunk,
-                    start=_day_start(cohort_start),
-                    end=activity_end + timedelta(microseconds=1),
-                )
-                for user_id, timestamps in credit_activity.items():
-                    activity_by_user[user_id].extend(timestamps)
-        daily_end = min(
+        grid_end = min(
             end + timedelta(days=35), current_time.date() + timedelta(days=1)
         )
-        daily = (
-            self._daily(
-                ids,
-                start=cohort_start,
-                end=daily_end,
-            )
-            if ids
-            else []
-        )
+        active_dates: dict[int, set[date]] = defaultdict(set)
+        day_quality: dict[date, str] = {}
+        if ids:
+            # list_active_dates chunks by MAX_USER_BATCH itself.
+            for user_id, days in self.value_store.list_active_dates(
+                ids, start=cohort_start, end=grid_end
+            ).items():
+                active_dates[user_id].update(days)
+            # A ledger movement (a purchase, a grant, a debit) retains a user
+            # as it did on main, which unioned list_credit_activity into the
+            # event activity. The fact ``active`` flag is set from events
+            # alone, so without this a cohort member whose only week-2
+            # activity was a Credits purchase read as churned.
+            # list_credit_activity takes one batch at most.
+            for offset in range(0, len(ids), MAX_USER_BATCH):
+                for user_id, stamps in self.value_store.list_credit_activity(
+                    ids[offset : offset + MAX_USER_BATCH],
+                    start=_day_start(cohort_start),
+                    end=_day_start(grid_end),
+                ).items():
+                    active_dates[user_id].update(stamp.date() for stamp in stamps)
+            # A day is trustworthy only when it has fact rows and none is partial.
+            for row in self.value_store.count_segments_by_date(
+                start=cohort_start, end=grid_end
+            ):
+                if row.partial_rows:
+                    day_quality[row.snapshot_date] = "partial"
+                else:
+                    day_quality.setdefault(row.snapshot_date, "complete")
+
+        def week_quality(
+            target_start: date, target_end: date
+        ) -> Literal["complete", "partial"]:
+            day = target_start
+            while day < target_end:
+                if day_quality.get(day) != "complete":
+                    return "partial"
+                day += timedelta(days=1)
+            return "complete"
 
         cohorts: list[RetentionCohort] = []
         all_cells: dict[int, list[RetentionCell]] = {1: [], 2: [], 4: []}
@@ -962,12 +908,6 @@ class ValueAnalyticsQueryService:
                 target_start = cohort_week + timedelta(days=week * 7)
                 target_end = target_start + timedelta(days=7)
                 mature = current_time >= _day_start(target_end)
-                quality = self._retention_quality(
-                    daily,
-                    user_ids=members,
-                    start=target_start,
-                    end=target_end,
-                )
                 retained = None
                 eligible = None
                 rate = None
@@ -975,10 +915,8 @@ class ValueAnalyticsQueryService:
                     eligible = len(members)
                     retained = sum(
                         any(
-                            _day_start(target_start)
-                            <= timestamp
-                            < _day_start(target_end)
-                            for timestamp in activity_by_user.get(user_id, ())
+                            target_start <= day < target_end
+                            for day in active_dates.get(user_id, ())
                         )
                         for user_id in members
                     )
@@ -989,7 +927,7 @@ class ValueAnalyticsQueryService:
                     retained_users=retained,
                     eligible_users=eligible,
                     rate=rate,
-                    data_quality=quality,
+                    data_quality=week_quality(target_start, target_end),
                 )
                 cells[week] = cell
                 all_cells[week].append(cell)
@@ -1015,12 +953,8 @@ class ValueAnalyticsQueryService:
             summary_week_2=self._summary_cell(2, all_cells[2]),
             summary_week_4=self._summary_cell(4, all_cells[4]),
             availability=SectionAvailability(
-                available=bool(current) or not users,
-                status=(
-                    "partial"
-                    if partial
-                    else "ready" if len(current) == len(users) else "building"
-                ),
+                available=True,
+                status="partial" if partial else "ready",
                 coverage_start=cohort_start if cohorts else None,
                 coverage_end=end - timedelta(days=1) if cohorts else None,
             ),
@@ -1115,9 +1049,18 @@ class ValueAnalyticsQueryService:
     ) -> OperationalAnalyticsResponse:
         start, end = _validate_dates(start, end)
         current_time = _utc(now or datetime.now(UTC), "now")
-        users = self._eligible_users(include_internal=include_internal)
-        current = self._current(users)
-        counts = Counter(snapshot.operational_state for snapshot in current.values())
+        yesterday = current_time.date() - timedelta(days=1)
+        # Fact rows hold no internal or excluded accounts, so ``include_internal``
+        # widens only the overview figures below. State counts are as of the
+        # latest landed fact day -- the same day /users falls back to, so the
+        # two pages agree while the night's job has not landed.
+        facts_day = self._landed_fact_day(yesterday)
+        cells = self.value_store.count_states_for_date(facts_day) if facts_day else []
+        stale = bool(cells) and facts_day != yesterday
+        counts = {
+            state: sum(cell.users for cell in cells if cell.operational_state == state)
+            for state in _OPERATIONAL_STATES
+        }
         overview = self.legacy_service.get_overview(
             filters=AnalyticsMetricFilters(
                 start=_day_start(start),
@@ -1131,19 +1074,17 @@ class ValueAnalyticsQueryService:
         )
         growth_available = overview.availability["growth"].available
         friction_available = overview.availability["friction"].available
-        current_complete = len(current) == len(users)
-        available = bool(current) or not users or growth_available or friction_available
-        if not current_complete:
+        available = bool(cells) or growth_available or friction_available
+        if not cells:
+            # No fact day has landed: empty counts are not "none blocked".
             status = "building"
-        elif growth_available and friction_available:
+        elif growth_available and friction_available and not stale:
             status = "ready"
         else:
             status = "partial" if available else "unavailable"
         return OperationalAnalyticsResponse(
             as_of=current_time,
-            operational_state_counts={
-                state: int(counts.get(state, 0)) for state in _OPERATIONAL_STATES
-            },
+            operational_state_counts=counts,
             # Unknown whenever the growth read failed, even part-way: the
             # overview can compute a figure and then fail the block.
             backtest_success_rate=(
@@ -1161,9 +1102,40 @@ class ValueAnalyticsQueryService:
             top_failure_categories=overview.top_failure_categories,
             availability=SectionAvailability(
                 available=available,
+                stale=stale,
                 status=status,
+                # The day the state counts describe, so a stale fallback says
+                # how stale it is.
+                coverage_start=facts_day if cells else None,
+                coverage_end=facts_day if cells else None,
             ),
         )
+
+    def top_operational_reasons(
+        self, *, day: date, limit: int = 10
+    ) -> list[OperationalReasonCount]:
+        """Why users were blocked or needed attention on ``day`` (design §9).
+
+        One grouped read over the fact rows; the reason text is the rule
+        table's copy, never the stored code alone.
+        """
+        page_size = positive_limit(limit)
+        totals: Counter[str] = Counter()
+        for cell in self.value_store.count_states_for_date(day):
+            # A NULL code is not a supported reason (it reads as
+            # no_supported_issue); the row still counts under its state.
+            if (
+                cell.operational_state in {"blocked", "needs_attention"}
+                and cell.operational_reason_code is not None
+            ):
+                totals[cell.operational_reason_code] += cell.users
+        ranked = sorted(totals.items(), key=lambda item: (-item[1], item[0]))
+        return [
+            OperationalReasonCount(
+                reason_code=code, reason=operational_reason(code), users=users
+            )
+            for code, users in ranked[:page_size]
+        ]
 
     def get_groups(
         self,
@@ -1175,10 +1147,12 @@ class ValueAnalyticsQueryService:
     ) -> GroupAnalyticsResponse:
         """Build the fixed-order source summary for one UTC date window.
 
-        The account row is the source of truth for group membership. Event and
-        Credits reads are deliberately batched and independently guarded so a
-        missing projection leaves six honest rows with partial availability,
-        rather than dropping the whole summary.
+        The account row is the source of truth for group membership. Run counts
+        and operator cost come from one grouped read of ``user_daily_facts``,
+        which carries the group each day was written under. That read and the
+        Credits read are independently guarded so a missing projection leaves
+        six honest rows with partial availability, rather than dropping the
+        whole summary.
         """
 
         start, end = _validate_dates(start, end)
@@ -1193,7 +1167,8 @@ class ValueAnalyticsQueryService:
         users_available = True
         try:
             all_users = self._eligible_users(include_internal=include_internal)
-        except Exception:
+        except Exception as exc:
+            _warn_read_failed("groups_users", exc)
             all_users = []
             users_available = False
 
@@ -1220,60 +1195,34 @@ class ValueAnalyticsQueryService:
         users_by_group: Counter[UserGroup] = Counter(
             group_by_user[user_id] for user_id in user_ids
         )
-        requested_by_group: Counter[UserGroup] = Counter()
-        successful_users_by_group: dict[UserGroup, set[int]] = defaultdict(set)
-        completion_days_by_group: dict[
-            UserGroup, dict[int, set[date]]
-        ] = defaultdict(lambda: defaultdict(set))
-        cost_by_group: Counter[UserGroup] = Counter()
-        events_available = True
-        events: Sequence[Any] = ()
-        period_start = _day_start(start)
-        period_end = _day_start(end)
-        try:
-            list_metric_events = getattr(self.query_store, "list_metric_events", None)
-            if callable(list_metric_events):
-                events = list_metric_events(
-                    start=period_start,
-                    end=period_end,
-                    include_internal=include_internal,
-                )
-            else:
-                # Small synthetic stores used by older callers expose only
-                # the rollup reader. It is still display-safe; account
-                # eligibility above remains the authoritative filter.
-                events = self.query_store.rollups.list_events(
-                    start=period_start,
-                    end=period_end,
-                    include_internal=True,
-                )
-        except Exception:
-            events_available = False
-
-        for event in events:
+        # Facts exist only through yesterday, and a past day has them only
+        # once the night's job lands. Coverage is read, not assumed from the
+        # calendar: a window holding a day the job has not landed (or failed
+        # to write) would otherwise read that day as zero runs, "ready".
+        facts_end = min(end, current_time.date())
+        expected_days = {
+            start + timedelta(days=offset) for offset in range((facts_end - start).days)
+        }
+        landed_days: set[date] = set()
+        facts_available = True
+        totals: dict[str, GroupFactTotals] = {}
+        if expected_days:
             try:
-                event_user_id = positive_user_id(getattr(event, "user_id"))
-                if event_user_id not in user_ids:
-                    continue
-                occurred_at = _event_utc(getattr(event, "occurred_at"))
-                if not (period_start <= occurred_at < period_end):
-                    continue
-                group = group_by_user[event_user_id]
-                event_name = getattr(event, "event_name", None)
-            except (AttributeError, TypeError, ValueError, KeyError):
-                # Ignore malformed legacy event rows while preserving a valid
-                # summary for the rest of the period.
-                events_available = False
-                continue
-            if event_name == "backtest_requested":
-                requested_by_group[group] += 1
-            elif event_name == "backtest_completed":
-                successful_users_by_group[group].add(event_user_id)
-                completion_days_by_group[group][event_user_id].add(
-                    occurred_at.date()
-                )
-            elif event_name == "model_usage_recorded":
-                cost_by_group[group] += _safe_cost_micro_usd(event)
+                totals = self.value_store.sum_facts_by_user_group(start=start, end=end)
+                landed_days = {
+                    row.snapshot_date
+                    for row in self.value_store.count_segments_by_date(
+                        start=start, end=facts_end
+                    )
+                }
+            except Exception as exc:
+                _warn_read_failed("groups_facts", exc)
+                facts_available = False
+        landed = bool(landed_days)
+        if selected_group is not None:
+            totals = {
+                group: value for group, value in totals.items() if group == selected_group
+            }
 
         commercial_available = True
         commercial: dict[int, CommercialValueFact] = {}
@@ -1281,7 +1230,8 @@ class ValueAnalyticsQueryService:
             commercial = self._commercial(user_rows, start=start, end=end)
             if user_ids and not user_ids.issubset(commercial):
                 commercial_available = False
-        except Exception:
+        except Exception as exc:
+            _warn_read_failed("groups_commercial", exc)
             commercial_available = False
 
         paid_by_group: Counter[UserGroup] = Counter()
@@ -1293,20 +1243,16 @@ class ValueAnalyticsQueryService:
 
         rows: list[UserGroupSummary] = []
         for group in USER_GROUPS:
-            successful_users = successful_users_by_group[group]
-            repeat_users = sum(
-                len(days) >= 2
-                for days in completion_days_by_group[group].values()
-            )
+            group_totals = totals.get(group, GroupFactTotals())
             rows.append(
                 UserGroupSummary(
                     group=group,
                     label=USER_GROUP_LABELS[group],
                     users=int(users_by_group[group]),
-                    successful_run_users=len(successful_users),
-                    repeat_users=repeat_users,
-                    total_runs=int(requested_by_group[group]),
-                    atl_cost_micro_usd=int(cost_by_group[group]),
+                    successful_run_users=group_totals.successful_run_users,
+                    repeat_users=group_totals.repeat_users,
+                    total_runs=group_totals.total_runs,
+                    atl_cost_micro_usd=group_totals.operator_cost_micro,
                     paid_users=int(paid_by_group[group]),
                 )
             )
@@ -1314,12 +1260,22 @@ class ValueAnalyticsQueryService:
         if not users_available:
             availability = SectionAvailability(available=False, status="unavailable")
         else:
-            complete = events_available and commercial_available
+            # A partial fact row in the window (a failed source step, or the
+            # PR A history copy's zero-filled days) makes its zeros unknowns,
+            # and so does a past day with no fact rows at all.
+            facts_partial = any(value.partial_rows for value in totals.values())
+            complete = (
+                landed
+                and landed_days == expected_days
+                and facts_available
+                and commercial_available
+                and not facts_partial
+            )
             availability = SectionAvailability(
                 available=True,
                 status="ready" if complete else "partial",
-                coverage_start=start,
-                coverage_end=end - timedelta(days=1),
+                coverage_start=min(landed_days) if landed else None,
+                coverage_end=max(landed_days) if landed else None,
             )
         return GroupAnalyticsResponse(
             as_of=current_time,
@@ -1342,88 +1298,92 @@ class ValueAnalyticsQueryService:
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
             raise ValueError("offset must be a non-negative integer")
         current_time = _utc(now or datetime.now(UTC), "now")
-        users = self._eligible_users(include_internal=filters.include_internal)
-        current = self._current(users)
-        commercial = self._commercial(
-            users,
-            start=current_time.date() - timedelta(days=30),
-            end=current_time.date() + timedelta(days=1),
+        yesterday = current_time.date() - timedelta(days=1)
+        query = UserPageQuery(
+            q=filters.q,
+            lifecycle_segment=filters.lifecycle_segment,
+            operational_state=filters.operational_state,
+            commercial_tier=filters.commercial_tier,
+            user_group=filters.user_group,
+            activated=filters.activated,
+            last_meaningful_activity_from=filters.last_meaningful_activity_from,
+            last_meaningful_activity_to=filters.last_meaningful_activity_to,
+            priority=filters.priority,
+            include_internal=filters.include_internal,
         )
-        legacy = self.query_store.list_snapshots() if filters.legacy_status else {}
-        selected: list[ValueUserListItem] = []
-        needle = filters.q.casefold() if filters.q else None
-        for user in users:
-            user_id = int(user["id"])
-            snapshot = current.get(user_id)
-            fact = commercial.get(user_id)
-            if snapshot is None or fact is None:
-                continue
-            user_group = coerce_user_group(user.get("user_group"))
-            if filters.user_group is not None and user_group != filters.user_group:
-                continue
-            group = _priority_group(snapshot)
-            if filters.priority and group == "none":
-                continue
-            if filters.lifecycle_segment not in {None, snapshot.lifecycle_segment}:
-                continue
-            if filters.operational_state not in {None, snapshot.operational_state}:
-                continue
-            if filters.commercial_tier not in {None, fact.commercial_tier}:
-                continue
-            if filters.activated is not None:
-                if (snapshot.activated_at is not None) != filters.activated:
-                    continue
-            if filters.last_meaningful_activity_from is not None and (
-                snapshot.last_meaningful_activity_at is None
-                or snapshot.last_meaningful_activity_at
-                < filters.last_meaningful_activity_from
-            ):
-                continue
-            if filters.last_meaningful_activity_to is not None and (
-                snapshot.last_meaningful_activity_at is None
-                or snapshot.last_meaningful_activity_at
-                > filters.last_meaningful_activity_to
-            ):
-                continue
-            if filters.legacy_status is not None and (
-                user_id not in legacy or legacy[user_id].status != filters.legacy_status
-            ):
-                continue
-            if needle is not None and needle not in (
-                f"{user.get('display_name', '')} {user.get('email', '')}".casefold()
-            ):
-                continue
-            selected.append(
+        # The page joins yesterday's facts. Before the night's job lands, or
+        # while it is failing, that join is empty and every row would read
+        # healthy / unpaid with no signal: join the latest landed day instead,
+        # stamp the operational as_of from it, and say so in the log (once
+        # per stale day, not once per page load).
+        facts_day = self._landed_fact_day(yesterday) or yesterday
+        rows, total = self.value_store.list_users_page(
+            query=query, day=facts_day, limit=page_size, offset=offset
+        )
+        ids = [row.user_id for row in rows]
+        totals = (
+            self.value_store.sum_recent_facts(
+                ids, start=yesterday - timedelta(days=29), end=yesterday
+            )
+            if ids
+            else {}
+        )
+        commercial = (
+            self.value_store.list_commercial_values(
+                ids,
+                start=_day_start(yesterday),
+                end=_day_start(yesterday + timedelta(days=1)),
+            )
+            if ids
+            else {}
+        )
+        as_of = _day_start(facts_day + timedelta(days=1))
+        items: list[ValueUserListItem] = []
+        for row in rows:
+            activity = (
+                UserActivity(
+                    user_id=row.user_id,
+                    activated_at=row.activated_at,
+                    last_meaningful_activity_at=row.last_meaningful_activity_at,
+                    updated_at=current_time,
+                )
+                if row.activated_at is not None
+                or row.last_meaningful_activity_at is not None
+                else None
+            )
+            lifecycle = calculate_lifecycle(
+                build_lifecycle_inputs(
+                    row.user_id,
+                    created_at=row.created_at,
+                    activity=activity,
+                    totals=totals.get(row.user_id),
+                    as_of=current_time,
+                ),
+                current_time,
+            )
+            fact = commercial.get(row.user_id)
+            items.append(
                 ValueUserListItem(
-                    user_id=user_id,
-                    display_name=str(user.get("display_name") or ""),
-                    email=str(user.get("email") or ""),
-                    joined_at=_parse_timestamp(user["created_at"]),
-                    lifecycle=_lifecycle(snapshot),
-                    operational=_operational(snapshot),
-                    commercial_tier=fact.commercial_tier,
-                    lifetime_net_purchased_micro=fact.lifetime_net_purchased_micro,
-                    priority_group=group,
-                    profile_path=f"/admin/analytics/users/{user_id}",
+                    user_id=row.user_id,
+                    display_name=row.display_name,
+                    email=row.email,
+                    joined_at=row.created_at,
+                    lifecycle=lifecycle,
+                    operational=operational_result_from_code(
+                        row.operational_reason_code, as_of=as_of
+                    ),
+                    commercial_tier=row.tier,
+                    lifetime_net_purchased_micro=(
+                        fact.lifetime_net_purchased_micro if fact is not None else 0
+                    ),
+                    priority_group=_priority_group(
+                        row.operational_state, row.lifecycle_segment
+                    ),
+                    profile_path=f"/admin/analytics/users/{row.user_id}",
                 )
             )
-        if filters.priority:
-            selected.sort(
-                key=lambda item: (
-                    _PRIORITY_RANK[item.priority_group],
-                    -_TIER_RANK[item.commercial_tier],
-                    -item.lifetime_net_purchased_micro,
-                    -item.lifecycle.inactive_days,
-                    item.user_id,
-                )
-            )
-        else:
-            selected.sort(key=lambda item: item.user_id)
         return PaginatedValueUsers(
-            items=selected[offset : offset + page_size],
-            total=len(selected),
-            limit=page_size,
-            offset=offset,
+            items=items, total=total, limit=page_size, offset=offset
         )
 
     def get_user_profile(
@@ -1437,30 +1397,39 @@ class ValueAnalyticsQueryService:
         start, end = _validate_dates(start, end)
         subject_id = positive_user_id(user_id)
         current_time = _utc(now or datetime.now(UTC), "now")
-        snapshot = self.value_store.get_current_snapshot(subject_id)
-        if snapshot is None:
-            raise LookupError("Analytics value snapshot was not found")
-        commercial = self.value_store.list_commercial_values(
-            [subject_id],
-            start=_day_start(start),
-            end=_day_start(end),
-        )[subject_id]
+        axes = self.legacy_service.get_user_axes(subject_id, now=current_time)
         legacy = self.legacy_service.get_user_profile(
             user_id=subject_id,
             now=current_time,
             start=_day_start(start),
             end=_day_start(end),
+            axes=axes,
         )
-        _weekly, _movement, transitions, _availability = self._history(
+        commercial = self.value_store.list_commercial_values(
             [subject_id],
-            start=start,
-            end=end,
-            use_anonymous_rollups=False,
-        )
+            start=_day_start(start),
+            end=_day_start(end),
+        )[subject_id]
+        # This user's own moves from the transition log, each stamped with its
+        # own day. Never the anonymous rollups: they are population-wide.
+        transitions = [
+            LifecycleTransition(
+                from_segment=row.from_segment,
+                to_segment=row.to_segment,
+                users=1,
+                period_start=row.snapshot_date,
+                period_end=row.snapshot_date + timedelta(days=1),
+                data_quality=row.data_quality,
+            )
+            for row in self.value_store.list_user_transitions(
+                subject_id, start=start, end=end
+            )
+        ]
+        lifecycle, operational = axes
         return ValueUserProfile(
             **legacy.model_dump(),
-            lifecycle=_lifecycle(snapshot),
-            operational=_operational(snapshot),
+            lifecycle=lifecycle,
+            operational=operational,
             commercial=commercial,
             selected_period_start=start,
             selected_period_end=end,
@@ -1478,6 +1447,7 @@ __all__ = [
     "LifecycleMovementPoint",
     "LifecycleTransition",
     "OperationalAnalyticsResponse",
+    "OperationalReasonCount",
     "PaginatedValueUsers",
     "RetentionAnalyticsResponse",
     "RetentionCell",

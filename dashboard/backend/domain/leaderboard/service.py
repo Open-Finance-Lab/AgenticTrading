@@ -23,10 +23,17 @@ from zoneinfo import ZoneInfo
 
 import dashboard.backend.infrastructure.llm.token_cost as token_cost
 from dashboard.backend.database import db
+from dashboard.backend.domain.backtesting.metrics import (
+    daily_sharpe_basis,
+    daily_sharpe_interval,
+)
 import dashboard.backend.domain.leaderboard.baselines as _baselines
+from dashboard.backend.domain.backtesting.portfolio_manager import LLM_GATE_VERSION
+from dashboard.backend.domain.leaderboard.roster_failures import RosterFailures
 from dashboard.backend.domain.leaderboard.strategies._common import reference_start_date
 from dashboard.backend.domain.leaderboard.strategies import get_strategy
 from dashboard.backend.infrastructure.llm import backtest_harness as llm_harness
+from dashboard.backend.infrastructure.llm.validator import LLM_SELL_SIZING
 from dashboard.backend.infrastructure.market_data.sessions import session_close_time
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     MarketDataUnavailableError,
@@ -62,6 +69,12 @@ _daily_refresh_lock = threading.Lock()
 _daily_refresh_running = False
 # (configured_feed, stale_feeds) pairs already reported — see _warn_on_feed_drift.
 _warned_feed_drift: set[Tuple[str, Tuple[str, ...]]] = set()
+# (current gate, stale gate versions) pairs already reported -- see
+# _warn_on_gate_drift.
+_warned_gate_drift: set[Tuple[int, Tuple[int, ...]]] = set()
+# Where a run records how often its confidence was unreadable
+# (`_unusable_confidence_counts`; the engine writes the same block).
+UNUSABLE_CONFIDENCE_KEY = "unusable_confidence"
 # Two seeds are "the same seed" within this many dollars. A stored
 # ``initial_equity`` has been through a backtest and a JSON round-trip — the
 # committed board carries 100000.00000000003 for one entry — so `==` here would
@@ -408,7 +421,7 @@ def refresh_daily_leaderboard(
     }
 
     if deploy_models:
-        failures: List[Dict[str, str]] = []
+        roster = RosterFailures("daily")
         successes: List[Dict[str, Any]] = []
         # An entry the board publishes from repeat runs alone has no primary,
         # so `deploy_model_run` would miss its cache and bill a full run for a
@@ -421,6 +434,9 @@ def refresh_daily_leaderboard(
                     {"entry_id": entry_id, "cached": True, "published_from_samples": True}
                 )
                 continue
+            if roster.stopped:
+                roster.skip(entry_id)
+                continue
             try:
                 row = deploy_model_run(
                     entry_id,
@@ -428,14 +444,19 @@ def refresh_daily_leaderboard(
                     period="daily",
                     allow_fallback=allow_fallback,
                 )
-                successes.append(row)
-            except (LeaderboardFallbackError, ValueError, RuntimeError) as exc:
-                failures.append({"entry_id": entry_id, "error": str(exc)})
+            except Exception as exc:
+                # Same contract as the live loop: one entry's failure must not
+                # leave the rest undeployed or skip the state save below, and a
+                # fault every entry shares stops the roster (see roster_failures).
+                roster.failed(entry_id, exc)
+                continue
+            roster.traded(row)
+            successes.append(row)
         # Only mark complete when every model succeeded; a partial run must not
         # skip the remaining entries on the next cron (force=false).
-        result["models_deployed"] = not failures
+        result["models_deployed"] = not roster.failures
         result["model_results"] = successes
-        result["model_failures"] = failures
+        result["model_failures"] = roster.failures
 
     _save_daily_refresh_state(result)
     return result
@@ -918,7 +939,10 @@ def _sample_run_id(strategy_id: str, start_date: str, end_date: str, sample: int
 # sample run under a different model, prompt, ceiling, seed or tape is a
 # different experiment, and its spread is not the spread of this one. The two
 # provenance flags belong to the tape: a clamped SIP window priced a shorter
-# series, and an IEX fallback a thinner one, under the same feed label.
+# series, and an IEX fallback a thinner one, under the same feed label. The
+# sell rule (#661) belongs to the engine: a row without it closed whole
+# positions whatever the model's size, so it groups apart from one that sold
+# the size asked for, and the larger group publishes, as for the tape.
 _SAMPLE_CONFIG_KEYS = (
     "model_id",
     "integration",
@@ -926,10 +950,12 @@ _SAMPLE_CONFIG_KEYS = (
     "reasoning_effort",
     "strategy_prompt",
     "llm_max_output_tokens",
+    "llm_gate_version",
     "initial_capital",
     "market_data_feed",
     "end_clamped",
     "sip_fallback_to_iex",
+    "llm_sell_sizing",
 )
 # The part of that config an entry pins in leaderboard.json and a run records
 # verbatim (`_llm_run_metadata`); capital and prompt are `_cache_match_rank`'s.
@@ -1707,6 +1733,7 @@ def ensure_leaderboard_runs(
         missing.append(strategy)
 
     _warn_on_feed_drift(cached_runs, _configured_feed_or_none())
+    _warn_on_gate_drift(cached_runs)
     _warn_on_capital_drift(cached_runs, initial_capital)
 
     # Nothing left to compute — serve cached board without touching Alpaca.
@@ -1896,6 +1923,12 @@ def _reject_if_llm_fallback(
       publishing it still misrepresents the model (this is the 1-of-161 run that
       silently topped the board).
 
+    A third shape is not a fallback but is refused for the same reason: steps
+    whose unsized buys the gate skipped because their confidence was not a
+    number from 0 to 1 (``confidence_skipped_steps``, reported by the
+    strategy). Nothing rule-based traded on them, but neither did the model's
+    strategy, so they come off the numerator.
+
     Coverage keys off ``llm_decisions`` — steps the model actually drove — not
     ``llm_calls`` (billed API calls), because a truncated / unparseable response
     is billed yet trades rule-based. A run that returns garbage every step has
@@ -1912,6 +1945,12 @@ def _reject_if_llm_fallback(
         return
     if llm_decisions is None:
         llm_decisions = llm_calls
+    # Steps the model drove but whose unsized buys the gate could not trade,
+    # because their confidence was not a 0-1 number. No rule-based trade ran,
+    # so llm_decisions counts them; but the curve is not the model's strategy
+    # either, and a model answering 0-100 on every bar would otherwise publish
+    # a flat line at full coverage.
+    confidence_skipped = _reported_int(strategy_impl, "confidence_skipped_steps") or 0
     if not used_llm or llm_calls == 0:
         raise LeaderboardFallbackError(
             f"Entry '{entry_id}' produced a rule-based fallback "
@@ -1931,6 +1970,22 @@ def _reject_if_llm_fallback(
             f"intermittently failed for the active LLM gateway (e.g. rate limits "
             f"or output truncated into invalid JSON). Pass allow_fallback=True / "
             f"--allow-fallback to publish it anyway."
+        )
+    if (
+        decision_steps > 0
+        and confidence_skipped
+        and llm_decisions - confidence_skipped
+        < MIN_LLM_DECISION_COVERAGE * decision_steps
+    ):
+        usable = max(llm_decisions - confidence_skipped, 0)
+        raise LeaderboardFallbackError(
+            f"Entry '{entry_id}' lost buys on {confidence_skipped}/"
+            f"{decision_steps} steps to a confidence that is not a number from "
+            f"0 to 1 (often a 0-100 scale), leaving {usable}/{decision_steps} "
+            f"({usable / decision_steps:.1%}) steps traded as the model asked, "
+            f"below the {MIN_LLM_DECISION_COVERAGE:.0%} threshold. Refusing to "
+            f"publish the curve under model '{model}'. Pass allow_fallback=True "
+            f"/ --allow-fallback to publish it anyway."
         )
 
 
@@ -1983,8 +2038,10 @@ def _warn_on_feed_drift(runs: List[Dict[str, Any]], configured: Optional[str]) -
     runs on a public, unauthenticated GET, and treating a feed mismatch as
     "missing" would re-fetch Alpaca on every page load for as long as the
     mismatch persists (e.g. while SIP keeps falling back to IEX). Recomputing
-    is an operator action — ``POST /api/v1/leaderboard/refresh`` with
-    ``force=true``, or ``scripts/refresh_daily_leaderboard.py --remote``.
+    is an operator action — ``GET /api/v1/leaderboard?refresh=true`` (refresh
+    secret or admin session) for the Competition board, and for the daily
+    window ``POST /api/v1/leaderboard/daily/refresh?force=true&deploy_models=false``
+    or ``scripts/refresh_daily_leaderboard.py --remote --force``.
 
     Emitted once per distinct drift per process: this runs on the hot cached
     path of a public endpoint, and a line per page load would bury itself.
@@ -2011,6 +2068,50 @@ def _warn_on_feed_drift(runs: List[Dict[str, Any]], configured: Optional[str]) -
     )
 
 
+def _run_gate_version(run: Dict[str, Any]) -> Optional[int]:
+    """Gate version recorded on a cached run, or ``None`` for rows written
+    before it was (and for baselines, which no gate touched)."""
+    metadata = run.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    version = metadata.get("llm_gate_version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        return None
+    return version
+
+
+def _warn_on_gate_drift(runs: List[Dict[str, Any]]) -> None:
+    """Print when cached LLM rows were produced by another pre-trade gate.
+
+    The gate decides what a reply trades (``LLM_GATE_VERSION``), so a row from
+    an older gate and a fresh one are different experiments for one window.
+    A warning and not an auto-refresh, for ``_warn_on_feed_drift``'s reason: a
+    recompute here would be a billable model deploy started by a public GET.
+    Rows that never recorded a version are left out, as unrecorded feeds are;
+    once per distinct drift per process.
+    """
+    stale = sorted(
+        {
+            version
+            for run in runs
+            if (version := _run_gate_version(run)) is not None
+            and version != LLM_GATE_VERSION
+        }
+    )
+    if not stale:
+        return
+    seen_key = (LLM_GATE_VERSION, tuple(stale))
+    if seen_key in _warned_gate_drift:
+        return
+    _warned_gate_drift.add(seen_key)
+    print(
+        "WARNING: leaderboard has cached LLM runs from pre-trade gate version "
+        f"{', '.join(str(v) for v in stale)} while this build runs version "
+        f"{LLM_GATE_VERSION}. The same replies can trade differently under "
+        "another gate — force-refresh to recompute."
+    )
+
+
 def _warn_on_capital_drift(
     runs: List[Dict[str, Any]], configured: Optional[float]
 ) -> None:
@@ -2021,8 +2122,8 @@ def _warn_on_capital_drift(
     module to "cached rows are not comparable". A warning, once per distinct
     drift per process, never an auto-refresh — ``ensure_leaderboard_runs`` and
     ``get_leaderboard`` both run on a public, unauthenticated GET, and
-    recomputing is an operator action (``POST /api/v1/leaderboard/refresh`` with
-    ``force=true``).
+    recomputing is an operator action (the same refresh routes as
+    ``_warn_on_feed_drift`` names).
 
     Why capital is a comparability problem and not a display one: a $10,000 run
     buys whole shares in a coarser quantum than a $100,000 one and pays
@@ -2075,10 +2176,11 @@ def _llm_run_metadata(
     start_date: str,
     end_date: str,
 ) -> Optional[Dict[str, Any]]:
-    """Snapshot effective config for a published LLM run (``None`` otherwise)."""
+    """Snapshot effective config for a published LLM run (``None`` otherwise),
+    with the gate's record of replies it could not read."""
     if entry.get("strategy") != "llm_agent":
         return None
-    return {
+    metadata = {
         "entry_id": entry_id,
         "model_id": model_id,
         "integration": getattr(
@@ -2106,10 +2208,44 @@ def _llm_run_metadata(
             strategy_impl, "strategy_prompt", entry.get("strategy_prompt")
         ),
         "llm_max_output_tokens": llm_harness.DEFAULT_MAX_OUTPUT_TOKENS,
+        # The pre-trade gate that turned replies into orders: two rows for one
+        # window are one experiment only under one gate (`_warn_on_gate_drift`).
+        "llm_gate_version": LLM_GATE_VERSION,
+        # Which rule sized the model's sells (#661). Absent on a row written
+        # before it, which closed whole positions: such a row never pools with
+        # this one (`_SAMPLE_CONFIG_KEYS`), and a Live checkpoint without it is
+        # replayed, not resumed (`live._RESUME_KEY_DEFAULTS`).
+        "llm_sell_sizing": LLM_SELL_SIZING,
         "initial_capital": initial_capital,
         "start_date": start_date,
         "end_date": end_date,
     }
+    counts = _unusable_confidence_counts(strategy_impl)
+    if counts:
+        metadata[UNUSABLE_CONFIDENCE_KEY] = counts
+    return metadata
+
+
+def _unusable_confidence_counts(
+    strategy_impl: Any, prior: Optional[Dict[str, Any]] = None
+) -> Dict[str, int]:
+    """How often the run's confidence was not a 0-1 number, zeros left out.
+
+    The same three keys the engine records for a dashboard backtest. ``prior``
+    is a stored block to add to: a live checkpoint resumes a month, and its
+    strategy counts only the segment it traded.
+    """
+    counts = {
+        "actions": _reported_int(strategy_impl, "unusable_confidence_actions") or 0,
+        "skipped_buys": _reported_int(strategy_impl, "unusable_confidence_skipped") or 0,
+        "skipped_steps": _reported_int(strategy_impl, "confidence_skipped_steps") or 0,
+    }
+    if isinstance(prior, dict):
+        for key in counts:
+            value = prior.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                counts[key] += value
+    return {key: count for key, count in counts.items() if count}
 
 
 def deploy_model_run(
@@ -2871,8 +3007,9 @@ def get_leaderboard(
         # per-trade costs make a $10k run a genuinely *different* run from a
         # $100k one rather than a scaled copy of it — a $10k account cannot buy
         # the same basket in the same proportions, so its returns differ, not
-        # just its dollar levels. Returns / Sharpe below come off the stored run
-        # untouched, so the shim moves the dollar axis only. Re-running each
+        # just its dollar levels. Returns below come off the stored run
+        # untouched and Sharpe is a ratio of the scaled curve's own returns, so
+        # the shim moves the dollar axis only. Re-running each
         # entry at the published seed is the real fix (issue #194).
         scale = display_capital / stored_initial
         if (
@@ -2892,6 +3029,20 @@ def get_leaderboard(
             )
         scaled_hourly = _scaled_hourly(equity_hourly, scale)
         _report_curve_integrity(strategy["id"], run["run_id"], scaled_hourly)
+        # P19 daily Sharpe with its 95% interval, computed here at read time
+        # rather than read from `agent_runs.sharpe_ratio` (hourly marks, ddof 0,
+        # 0 for "undefined"). Fed the scaled hourly curve, NOT `equity_curve`
+        # below: `chart_equity_curve` prepends a synthetic
+        # `{start_date}T00:00:00+00:00` tick, which is the previous US/Eastern
+        # day and would add a session that never traded.
+        #
+        # ⚠ E_0 is an approximation on this board. The stored seed
+        # (`initial_equity`) is the curve's first mark -- seed plus one hour of
+        # P&L -- so the scaled curve opens AT display_capital and day 1's return
+        # leaves out the first hour. Live keeps that hour (its rows record the
+        # true seed in metadata). One hour of a multi-week window; the
+        # Competition board is never re-run (spec 2026-10-14 §6).
+        sharpe = daily_sharpe_interval(scaled_hourly, display_capital)
         span = _curve_span(equity_hourly)
         if span is not None:
             published_spans[strategy["id"]] = span
@@ -2922,7 +3073,11 @@ def get_leaderboard(
                 "initial_equity": display_capital,
                 "portfolio_value": portfolio_value,
                 "cumulative_return": run.get("total_return") or 0,
-                "sharpe_ratio": run.get("sharpe_ratio") or 0,
+                "sharpe_ratio": sharpe["sharpe"],
+                "sharpe_ci_low": sharpe["ci_low"],
+                "sharpe_ci_high": sharpe["ci_high"],
+                "sharpe_days": sharpe["days"],
+                "sharpe_status": sharpe["status"],
                 "max_drawdown": run.get("max_drawdown") or 0,
                 "status": "Model" if is_model else "Baseline",
                 "run_id": run["run_id"],
@@ -3003,6 +3158,8 @@ def get_leaderboard(
         "updated_at": meta.get("refreshed_at"),
         "total_entries": len(entries),
         "display_capital": display_capital,
+        # What every entry's sharpe_* fields mean; the table quotes these.
+        "sharpe_basis": daily_sharpe_basis(),
         "leader": leader,
         "entries": entries,
     }

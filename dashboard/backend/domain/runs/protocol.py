@@ -15,7 +15,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from dashboard.backend.infrastructure.llm.validator import normalize_symbol
 
 PROTOCOL_VERSION = "1.0"
 
@@ -63,6 +65,15 @@ class OrderIn(BaseModel):
     # overflow the engine's integer share math.
     quantity: float = Field(ge=0, lt=1e12, allow_inf_nan=False)
     order_type: str = Field(default="market")
+
+    @field_validator("symbol")
+    @classmethod
+    def _normalize_symbol(cls, v: str) -> str:
+        # Same rule as v2's ActionItem, so ' aapl ' is AAPL on both step-driven
+        # surfaces. Normalization only, never a refusal: membership stays the
+        # per-order ``invalid_symbol`` check in submit_decision, so one bad
+        # symbol never voids the rest of the decision.
+        return normalize_symbol(v)
 
 
 class DecisionIn(BaseModel):

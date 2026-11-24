@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import os
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import psycopg
@@ -18,13 +18,17 @@ from dashboard.backend.domain.analytics import repository_postgres as pg_module
 from dashboard.backend.domain.analytics.repository_postgres import (
     PostgresAnalyticsStore,
 )
-from dashboard.backend.domain.analytics.rollups import AnalyticsRollupStore, DailyRollup
+from dashboard.backend.domain.analytics.rollups import (
+    AnalyticsRollupStore,
+    DailyRollup,
+    rollup_day,
+    rollup_lifecycle_day,
+)
 from dashboard.backend.domain.analytics.value_repository import (
     ActivityUpdate,
     LifecycleTransitionRow,
     ProjectionJob,
     UserDailyFact,
-    UserLifecycleDailySnapshot,
 )
 from dashboard.backend.domain.analytics.value_repository_postgres import (
     PostgresValueAnalyticsStore,
@@ -45,7 +49,6 @@ from dashboard.backend.tests.domain.analytics.test_value_repository import (
     SyntheticCreditsStore,
     SyntheticProviderStore,
     SyntheticRunStore,
-    _value_snapshot,
 )
 
 
@@ -171,25 +174,6 @@ def test_public_repository_methods_match():
     )
 
 
-def test_postgres_ddl_declares_user_value_projection_storage():
-    ddl = pg_module.ANALYTICS_POSTGRES_DDL
-    assert "CREATE TABLE IF NOT EXISTS user_lifecycle_daily_snapshots" in ddl
-    assert "CREATE TABLE IF NOT EXISTS analytics_projection_jobs" in ddl
-    for column in (
-        "lifecycle_segment",
-        "operational_state",
-        "activated_at",
-        "last_meaningful_activity_at",
-        "inactive_days",
-        "active_days_30d",
-        "successful_backtests_30d",
-    ):
-        assert column in ddl or f'"{column}"' in ddl
-    assert "ADD COLUMN IF NOT EXISTS" in inspect.getsource(
-        PostgresAnalyticsStore._init_schema
-    )
-
-
 @pg_only
 def test_postgres_runs_shared_event_contracts(postgres_contract_store):
     store, _admin_id, user_id = postgres_contract_store
@@ -217,26 +201,17 @@ def test_postgres_runs_pr2_query_contract(postgres_contract_store):
 
 
 @pg_only
-def test_postgres_user_value_projection_round_trip(
+def test_postgres_projection_job_and_lifecycle_rollups_round_trip(
     postgres_contract_store,
     tmp_path,
 ):
-    analytics, _admin_id, user_id = postgres_contract_store
+    analytics, _admin_id, _user_id = postgres_contract_store
     value_store = PostgresValueAnalyticsStore(
         analytics,
         SyntheticCreditsStore(tmp_path / "postgres-value-credits.db"),
         provider_base=SyntheticProviderStore({}, []),
         agent_base=SyntheticAgentStore(),
         run_base=SyntheticRunStore({}),
-    )
-    snapshot = _value_snapshot(user_id)
-    daily = UserLifecycleDailySnapshot(
-        snapshot_date=NOW.date(),
-        user_id=user_id,
-        lifecycle_segment="core",
-        lifecycle_reason_code="core_repeated_value",
-        data_quality="complete",
-        calculated_at=NOW,
     )
     job = ProjectionJob(
         job_name="postgres-lifecycle-backfill",
@@ -246,17 +221,9 @@ def test_postgres_user_value_projection_round_trip(
         updated_at=NOW,
     )
 
-    value_store.upsert_current_snapshot(snapshot)
-    value_store.upsert_daily_snapshot(daily)
+    value_store.save_projection_job(job)
     value_store.save_projection_job(job)
 
-    assert value_store.get_current_snapshot(user_id) == snapshot
-    assert value_store.list_current_snapshots([user_id]) == {user_id: snapshot}
-    assert value_store.list_daily_snapshots(
-        start=NOW.date(),
-        end=NOW.date() + timedelta(days=1),
-        user_ids=[user_id],
-    ) == [daily]
     assert value_store.get_projection_job(job.job_name) == job
 
     value_store.replace_lifecycle_rollups(
@@ -277,12 +244,402 @@ def test_postgres_user_value_projection_round_trip(
         end=NOW.date() + timedelta(days=1),
     )
     assert lifecycle_rollups[0].metric_name == "lifecycle_segment_count"
-    assert value_store.list_expiring_daily_dates(
-        before=NOW.date() + timedelta(days=1),
-        limit=10,
-    ) == [NOW.date()]
-    assert value_store.delete_daily_snapshots_for_date(NOW.date()) == 1
-    assert value_store.has_daily_before(NOW.date() + timedelta(days=1)) is False
+
+
+@pg_only
+def test_postgres_reseed_then_drop_legacy_snapshot_tables(
+    postgres_contract_store,
+):
+    """The prod path of design SS11: re-seed from the live legacy row, drop the
+    two tables, and boot cleanly again once they are gone (UndefinedTable)."""
+    from dashboard.backend.domain.analytics.facts_migration import (
+        StartupMigrationReport,
+        run_startup_migrations,
+    )
+    from dashboard.backend.tests.domain.analytics.test_facts_migration import (
+        ACTIVATED_AT,
+        LAST_ACTIVITY_AT,
+        LEGACY_TABLES,
+    )
+
+    analytics, _admin_id, user_id = postgres_contract_store
+    value_store = PostgresValueAnalyticsStore(
+        analytics,
+        credits_base=object(),
+        provider_base=object(),
+        agent_base=object(),
+        run_base=object(),
+    )
+    with analytics._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE user_analytics_snapshots (
+                    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    status TEXT NOT NULL,
+                    calculated_at TEXT NOT NULL,
+                    activated_at TEXT,
+                    last_meaningful_activity_at TEXT
+                )
+                """
+            )
+            cur.execute(
+                "CREATE TABLE user_lifecycle_daily_snapshots ("
+                "snapshot_date TEXT NOT NULL, user_id INTEGER NOT NULL)"
+            )
+            cur.execute(
+                "INSERT INTO user_analytics_snapshots (user_id, status, calculated_at, "
+                "activated_at, last_meaningful_activity_at) VALUES (%s, 'active', %s, %s, %s)",
+                (user_id, NOW.isoformat(), ACTIVATED_AT.isoformat(), LAST_ACTIVITY_AT.isoformat()),
+            )
+
+    def legacy_tables_present() -> set[str]:
+        with analytics._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = current_schema() AND table_name = ANY(%s)",
+                    (list(LEGACY_TABLES),),
+                )
+                return {row["table_name"] for row in cur.fetchall()}  # dict_row pool
+
+    assert legacy_tables_present() == set(LEGACY_TABLES)
+
+    report = run_startup_migrations(value_store=value_store, now=NOW)
+
+    assert report == StartupMigrationReport(activity_seeded=1)
+    activity = value_store.get_activity(user_id)
+    assert activity.activated_at == ACTIVATED_AT
+    assert activity.last_meaningful_activity_at == LAST_ACTIVITY_AT
+    assert legacy_tables_present() == set()
+
+    # Second boot: the seed hits UndefinedTable and reads nothing; the drop is
+    # IF EXISTS. The failed SELECT must not poison the pooled connection.
+    analytics.drop_legacy_snapshot_tables()
+    assert value_store.seed_activity_from_snapshots(now=NOW) == 0
+    assert run_startup_migrations(value_store=value_store, now=NOW) == (
+        StartupMigrationReport(activity_seeded=0)
+    )
+    assert value_store.get_activity(user_id).activated_at == ACTIVATED_AT
+
+
+@pg_only
+def test_postgres_rolls_up_uncovered_legacy_days_before_the_drop(
+    postgres_contract_store,
+):
+    """I1 on the prod dialect: uncovered legacy days become anonymous lifecycle
+    rollups, a covered day is left alone, the drop follows, and the second boot
+    (to_regclass IS NULL) is a no-op."""
+    from dashboard.backend.domain.analytics.facts_migration import (
+        StartupMigrationReport,
+        run_startup_migrations,
+    )
+    from dashboard.backend.tests.domain.analytics.test_facts_migration import (
+        COVERED_DAY,
+        LEGACY_DAILY_DDL,
+        LEGACY_DAILY_ROWS,
+        UNCOVERED_DAYS,
+        _rollup_shape,
+        covering_fact,
+        legacy_lifecycle_rollups,
+    )
+
+    analytics, _admin_id, user_id = postgres_contract_store
+    value_store = PostgresValueAnalyticsStore(
+        analytics,
+        credits_base=object(),
+        provider_base=object(),
+        agent_base=object(),
+        run_base=object(),
+    )
+    with analytics._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "CREATE TABLE user_analytics_snapshots (user_id INTEGER PRIMARY KEY, "
+                "activated_at TEXT, last_meaningful_activity_at TEXT)"
+            )
+            cur.execute(LEGACY_DAILY_DDL)
+            for snapshot_date, legacy_user, segment, quality in LEGACY_DAILY_ROWS:
+                cur.execute(
+                    "INSERT INTO user_lifecycle_daily_snapshots "
+                    "VALUES (%s, %s, %s, 'x', %s, %s)",
+                    (snapshot_date, legacy_user, segment, quality, NOW.isoformat()),
+                )
+    value_store.upsert_daily_facts([covering_fact(user_id)])
+
+    def lifecycle_rollups(day):
+        return _rollup_shape(
+            AnalyticsRollupStore(analytics).list_rollups(
+                start=day, end=day + timedelta(days=1)
+            )
+        )
+
+    report = run_startup_migrations(value_store=value_store, now=NOW)
+
+    assert report == StartupMigrationReport(legacy_days_rolled_up=2)
+    for day in UNCOVERED_DAYS:
+        assert lifecycle_rollups(day) == legacy_lifecycle_rollups(day)
+    assert lifecycle_rollups(COVERED_DAY) == []
+    assert value_store.list_legacy_lifecycle_history().days == ()
+    assert run_startup_migrations(value_store=value_store, now=NOW) == (
+        StartupMigrationReport()
+    )
+
+
+@pg_only
+def test_postgres_copied_fact_days_get_their_transition_log(postgres_contract_store):
+    """Review #1 on the prod dialect: the day arithmetic and the legacy-source
+    join are the twin's own SQL, so the SQLite run says nothing about them."""
+    from dashboard.backend.domain.analytics.facts_migration import (
+        run_startup_migrations,
+    )
+    from dashboard.backend.tests.domain.analytics.test_facts_migration import (
+        LEGACY_DAILY_DDL,
+        assert_transition_history_backfilled,
+        seed_transition_history,
+    )
+
+    analytics, _admin_id, first = postgres_contract_store
+    value_store = PostgresValueAnalyticsStore(
+        analytics,
+        credits_base=object(),
+        provider_base=object(),
+        agent_base=object(),
+        run_base=object(),
+    )
+    second = 900
+    with analytics._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO users (id, email, display_name, password_hash, role, "
+                "created_at) VALUES (%s, 'second@example.test', 'S', 'x', 'user', "
+                "'2026-07-01T00:00:00+00:00')",
+                (second,),
+            )
+            cur.execute(
+                "CREATE TABLE user_analytics_snapshots (user_id INTEGER PRIMARY KEY, "
+                "activated_at TEXT, last_meaningful_activity_at TEXT)"
+            )
+            cur.execute(LEGACY_DAILY_DDL)
+
+    def insert_legacy(rows):
+        with analytics._get_connection() as conn:
+            with conn.cursor() as cur:
+                for snapshot_date, user_id, segment, quality in rows:
+                    cur.execute(
+                        "INSERT INTO user_lifecycle_daily_snapshots "
+                        "VALUES (%s, %s, %s, 'x', %s, %s)",
+                        (snapshot_date, user_id, segment, quality, NOW.isoformat()),
+                    )
+
+    seed_transition_history(value_store, first, second, insert_legacy)
+
+    report = run_startup_migrations(value_store=value_store, now=NOW)
+
+    assert report.transitions_backfilled == 2
+    assert_transition_history_backfilled(value_store, first, second)
+    assert run_startup_migrations(value_store=value_store, now=NOW).transitions_backfilled == 0
+
+
+@pg_only
+def test_postgres_activation_backfill_fills_rolled_up_days(postgres_contract_store):
+    """Review #5 on the prod dialect: substr() over the TEXT occurred_at and
+    the BOOLEAN excluded column are where the twins could diverge."""
+    analytics, _admin_id, user_id = postgres_contract_store
+    rollups = AnalyticsRollupStore(analytics)
+    day = NOW.date() - timedelta(days=3)
+    at = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=9)
+    analytics.append_event(
+        event_record(
+            user_id,
+            event_name="agent_created",
+            event_group="agent",
+            event_source="server",
+            source_event_id="agent:agent_created:activation-backfill-pg",
+            source_record_type="agent",
+            source_record_id="activation-backfill-pg",
+            page_view=None,
+            session_id=None,
+            device_category=None,
+            browser_family=None,
+            outcome=None,
+            occurred_at=at,
+            received_at=at + timedelta(seconds=1),
+        )
+    )
+    rollup_day(day, store=rollups)
+    with analytics._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM analytics_daily_rollups WHERE metric_name = 'activation_users'"
+            )
+
+    assert rollups.backfill_activation_users(since=day, until=day + timedelta(days=1)) == (day,)
+    counts = {
+        row.event_name: row.value_count
+        for row in rollups.list_rollups(start=day, end=day + timedelta(days=1))
+        if row.metric_name == "activation_users"
+    }
+    assert counts == {
+        "account_signed_up": 0,
+        "credential_verified": 0,
+        "agent_created": 1,
+        "backtest_completed": 0,
+    }
+    assert rollups.backfill_activation_users(since=day, until=day + timedelta(days=1)) == ()
+
+
+@pg_only
+def test_postgres_failed_seed_keeps_both_legacy_tables(postgres_contract_store):
+    from dashboard.backend.domain.analytics.facts_migration import (
+        run_startup_migrations,
+    )
+    from dashboard.backend.tests.domain.analytics.test_facts_migration import (
+        LEGACY_TABLES,
+    )
+
+    analytics, _admin_id, _user_id = postgres_contract_store
+    value_store = PostgresValueAnalyticsStore(
+        analytics,
+        credits_base=object(),
+        provider_base=object(),
+        agent_base=object(),
+        run_base=object(),
+    )
+    with analytics._get_connection() as conn:
+        with conn.cursor() as cur:
+            # Lacks activated_at: UndefinedColumn, not the tolerated UndefinedTable.
+            cur.execute("CREATE TABLE user_analytics_snapshots (user_id INTEGER PRIMARY KEY)")
+            cur.execute(
+                "CREATE TABLE user_lifecycle_daily_snapshots ("
+                "snapshot_date TEXT NOT NULL, user_id INTEGER NOT NULL)"
+            )
+
+    with pytest.raises(psycopg.errors.UndefinedColumn):
+        run_startup_migrations(value_store=value_store, now=NOW)
+
+    with analytics._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = current_schema() AND table_name = ANY(%s)",
+                (list(LEGACY_TABLES),),
+            )
+            present = {row["table_name"] for row in cur.fetchall()}
+    assert present == set(LEGACY_TABLES)
+
+
+@pg_only
+def test_postgres_fact_expiry_and_long_term_rollups_round_trip(postgres_contract_store, tmp_path):
+    from dashboard.backend.tests.domain.analytics.test_fact_reads import fact, transition
+
+    analytics, _admin_id, user_id = postgres_contract_store
+    value_store = PostgresValueAnalyticsStore(
+        analytics,
+        SyntheticCreditsStore(tmp_path / "postgres-expiry-credits.db"),
+        provider_base=SyntheticProviderStore({}, []),
+        agent_base=SyntheticAgentStore(),
+        run_base=SyntheticRunStore({}),
+    )
+    old, recent = NOW.date() - timedelta(days=200), NOW.date() - timedelta(days=1)
+    value_store.upsert_daily_facts(
+        [
+            fact(user_id, old, tier="starter", user_group="partner", runs_completed=3, operator_cost_micro=90_000),
+            fact(user_id, recent),
+        ]
+    )
+    value_store.append_lifecycle_transitions([transition(user_id, old, "onboarding", "growing")])
+    before = NOW.date() - timedelta(days=180)
+
+    # Rollup first (the long-term families), then expire the day.
+    rollups = rollup_lifecycle_day(old, store=value_store)
+    stored = AnalyticsRollupStore(analytics).list_rollups(start=old, end=old + timedelta(days=1))
+    assert {(r.metric_name, r.user_state, r.value_count, r.value_sum_micro) for r in stored} >= {
+        ("runs_by_tier", "starter", 3, 0),
+        ("operator_cost_by_user_group", "partner", 1, 90_000),
+        ("own_spend_by_tier", "starter", 1, 0),
+    }
+    assert {r.metric_name for r in rollups} == {r.metric_name for r in stored}
+
+    assert value_store.list_expiring_fact_dates(before=before, limit=10) == [old]
+    assert value_store.has_facts_before(before) is True
+    assert value_store.expire_facts_for_date(old) == 2  # one fact row + one transition
+    assert value_store.list_facts_for_date(old) == []
+    assert value_store.list_transitions_for_date(old) == []
+    assert value_store.list_facts_for_date(recent) != []  # inside the window, untouched
+    assert value_store.list_expiring_fact_dates(before=before, limit=10) == []
+    assert value_store.has_facts_before(before) is False
+
+    # A re-run finds no facts and leaves the day's rollups alone.
+    assert rollup_lifecycle_day(old, store=value_store) == ()
+    again = AnalyticsRollupStore(analytics).list_rollups(start=old, end=old + timedelta(days=1))
+    assert again == stored
+
+
+@pg_only
+def test_postgres_fact_reads_follow_the_contract(postgres_contract_store):
+    from dashboard.backend.tests.domain.analytics.test_fact_reads import (
+        assert_fact_read_contract,
+        assert_priority_sort_contract,
+        assert_read_time_exclusion_contract,
+        assert_transition_replace_contract,
+        assert_users_page_contract,
+        seed_population,
+    )
+
+    store, admin_id, _user_id = postgres_contract_store
+    value_store = PostgresValueAnalyticsStore(
+        analytics_base=store,
+        credits_base=object(),
+        provider_base=object(),
+        agent_base=object(),
+        run_base=object(),
+    )
+    next_id = iter(range(100, 200))
+    with store._get_connection() as conn:
+        with conn.cursor() as cur:
+            # The fixture's users table is a stub with no default id and no
+            # user_group column; the users page filters and returns it. The
+            # pre-seeded plain user is not part of the seeded population the
+            # contract counts, so drop it rather than loosen every total.
+            cur.execute(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS user_group TEXT "
+                "NOT NULL DEFAULT 'unknown'"
+            )
+            cur.execute("DELETE FROM users WHERE id = 2")
+
+    def create_user(key: str, email: str, group: str) -> int:
+        user_id = next(next_id)
+        with store._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO users (id, email, display_name, password_hash, "
+                    "role, created_at, user_group) VALUES (%s, %s, %s, 'x', "
+                    "'user', '2026-08-01T00:00:00+00:00', %s)",
+                    (user_id, email, key.title(), group),
+                )
+        return user_id
+
+    ids = seed_population(value_store, create_user, admin_id=admin_id)
+    assert_fact_read_contract(value_store, ids)
+    assert_users_page_contract(value_store, ids)
+    assert_priority_sort_contract(value_store, create_user)
+
+    def promote(user_id: int) -> None:
+        with store._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE users SET role = 'admin' WHERE id = %s", (user_id,))
+
+    # Last: it mutates the population the contracts above count.
+    assert_read_time_exclusion_contract(
+        value_store,
+        ids,
+        exclude=lambda user_id, excluded=True: store.set_subject_exclusion(
+            user_id, excluded=excluded, actor_user_id=admin_id, reason="test account"
+        ),
+        promote=promote,
+    )
+    assert_transition_replace_contract(value_store, ids)
 
 
 @pg_only

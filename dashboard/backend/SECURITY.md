@@ -108,19 +108,31 @@ The LLM **must** respond with JSON matching this schema:
 The hourly backtest engine (`domain/backtesting/portfolio_manager.py`,
 `make_trading_decision_with_llm`) — including runs driven by a user's
 free-form `strategy_prompt` (a My Agents agent's prompt) — does **not** route parsed
-decisions through `validate_llm_response`. It predates the validator and its
-behavior is intentionally preserved byte-for-byte for backtest reproducibility.
+decisions through `validate_llm_response`. It predates the validator. What it
+trades is versioned rather than frozen: every LLM run records the gate that
+turned its replies into orders as `llm_gate_version` in `agent_runs.metadata`
+(`LLM_GATE_VERSION` in `portfolio_manager.py`, bumped with any change to the
+rules below), and the rule that sized its sells as `llm_sell_sizing`, so a run
+or a decision tape is compared only with output from the same gate. The gate
+includes its readings of a reply (`normalize_symbol`, `read_confidence`,
+`normalize_action`): a replay through `orders_for_replay`, or a
+`diff_backtest_runs.py` comparison with a run from before a fix to them, can
+diverge from the first bar the fix reads differently. `"buy "`, for one,
+placed nothing before #658 and buys now.
 
 It applies these constraints inline instead:
 
 | Constraint | Enforcement |
 |------------|-------------|
 | JSON-only, no tools | No request sends `tools`; text blocks only (`extract_response_text`, which skips `tool_use` and thinking blocks); prompt scaffold pins the output contract; response is parsed as JSON only (`parse_llm_response`), never executed |
-| Symbol allowlist | Symbols outside the run's universe (`_allowed_set`: `DJIA_30` unless the run names a universe) skipped; a strict run rejects the whole batch |
-| Action count | Capped at one action per universe symbol (`len(allowed_symbols)`); excess entries ignored, or the whole batch rejected on a strict run |
-| Per-order size | `position_size > MAX_ORDER_SHARES` (10k, same constant as the validator) skipped; unparseable/non-finite sizes skipped |
+| Action vocabulary | Read by `normalize_action` (ASCII whitespace trimmed, ASCII letters lowercased) and matched against `TRADING_ACTIONS` (buy/sell/hold). A missing action holds; any other action is skipped with a log line, and a batch with no recognised action holds without H6 credit; a strict run rejects the whole batch. A pipeline's `orders` and `risk_actions` hand an unrecognised side on to this check rather than reading it as hold |
+| Symbol allowlist | Symbols are normalized with `normalize_symbol` (see below), then any outside the run's universe (`_allowed_set`: `DJIA_30` unless the run names a universe) is skipped; a strict run rejects the whole batch |
+| Action count | A count cap, not one action per symbol: at most `len(allowed_symbols)` actions per step; excess entries ignored, or the whole batch rejected on a strict run. A pipeline reply's `orders` and `risk_actions` are one batch, an order winning its symbol: a risk action on a name an order trades is dropped, so neither a second sell of one holding nor a stop beside a buy reaches the gate, and a reply naming each symbol once stays within the cap. A non-empty `actions` list overrides both. What either rule drops is logged and named on the decision tape (`ignored_envelopes`, `ignored_risk_symbols`). Repeats of one symbol are not merged, so one step can send that many orders for a single name, each up to `MAX_ORDER_SHARES` and bounded only by the cash and held-share limits below |
+| Per-order size (BUY) | Read by `_read_buy_size` (`portfolio_manager.py`), the one reading the strict pre-check and the loop share. Only a missing, null, empty or 0 size is sized from confidence. A size given that cannot be carried out is skipped and records an `invalid_quantity` order rejection, never sized from confidence: a bool, an empty list or dict, unparseable text, NaN or infinity; a size that rounds to 0 shares (0.6 on a whole-share market; a lot market keeps the float for the executor's lot check); a size that is not positive (-0.5, -3). `position_size > MAX_ORDER_SHARES` (10k, same constant as the validator) skipped |
+| Per-order size (SELL) | Sized by `requested_sell_shares` (`infrastructure/llm/validator.py`, shared with `actions_to_executable`): `position_size > 0` sells that many shares (under one share is refused, not truncated to 0); a missing/null/0 size sells `size_fraction` of the holding when the action carries one (above 0 and below 1 that part, rounded down to whole lots; 1, or 100 and more, all of it), else the whole position. 1 is read as the fraction, the unit the pipeline prompt states, though as a percentage it would be 1%; 100 and more are all of it on either reading. A bool, non-numeric text, NaN, infinity or a negative value in either field, a fraction that rounds to no shares, and a fraction between 1 and 100 (where a fraction and a percentage disagree, #690) skip the action and record an `invalid_quantity` order rejection with the shares asked for (a refused part, else 0; never negative); none is read as "the whole position". A pipeline's `risk_actions` hand both on as written: a share count under the first filled-in key `orders` reads (`qty`, `quantity`, `position_size`; `position_size` only beside no `size_pct`, as it is often a fraction there) as `position_size`, and `size_pct` as `size_fraction`, except a `size_pct` of 0 with no share count, which holds. Not bounded by `MAX_ORDER_SHARES`: a SELL is capped at the holding (and under T+1 at the sellable quantity), so it can exceed 10k only when the holding does, as a whole-position exit always could |
 | Cash bound | Buys must fit in available cash; sells limited to held shares |
-| Confidence floor | Actions with confidence < 0.3 skipped |
+| Confidence floor | Read by `read_confidence` (`infrastructure/llm/validator.py`): a missing confidence takes the path's default (0.5; a pipeline's `orders` 0.75, `risk_actions` 0.8), and actions below 0.3 are skipped |
+| Unreadable confidence | A confidence that is not a number from 0 to 1 (a bool, text, NaN, `25`) is not read: no scale is guessed and no default replaces it, so it neither passes nor fails the floor. A sell or a buy with its own `position_size` is carried out as written; a buy that would be sized from the confidence is skipped, or the whole batch rejected on a strict run. Each run counts these in `agent_runs.metadata.unusable_confidence`, prints one `ERROR: llm.unusable_confidence` line, and the leaderboard's H6 guard takes the skipped steps off its numerator |
 
 A custom `strategy_prompt` replaces only the *strategy* section of the prompt;
 the market snapshot, symbol allowlist, and strict JSON output contract are
@@ -128,6 +140,23 @@ appended by fixed scaffolding (`create_custom_prompt`) and cannot be overridden
 by the user text. If you need the stricter schema validation (tool-call
 rejection, audit logging), route through `validate_llm_response` as below —
 new endpoints must not copy this exemption.
+
+### Symbol normalization (every decision path)
+
+Every path that checks a decision's symbol against an allow-list first applies
+`normalize_symbol` (`infrastructure/llm/validator.py`). These paths are this
+engine loop, `validate_llm_response`, v1 `LLMTradingDecision`, v2 `ActionItem`
+(`validate_actions`), the protocol Run API's `OrderIn`, the AI Hedge Fund
+adapter, and the Robinhood live path (switched off). The Robinhood path
+validates the model's actions with the same `validate_actions` as v2.
+
+The rule trims ASCII whitespace and uppercases ASCII letters, so `" aapl "`
+trades as `AAPL`. It does nothing else. A value that is not ASCII after
+trimming is never case-folded, so it cannot match a ticker. That is the point:
+Unicode case mapping would turn look-alikes into real symbols (`"ıbm".upper()`
+is `"IBM"`, `"cſco".upper()` is `"CSCO"`), and on the Robinhood path a real
+symbol is a real order. Do not replace the helper with `str.strip().upper()`.
+That pair is Unicode-aware, and it reopens exactly that hole.
 
 ### Not covered: the Trading Algo backtest
 
@@ -137,8 +166,10 @@ and the table above does **not** apply to it. It reads `response.content[0].text
 instead of calling `extract_response_text`, parses with its own `find('{')`/`rfind('}')`
 plus `fix_json_formatting` instead of `parse_llm_response`, keeps at most 8 actions on
 `DJIA_30` names with confidence ≥ 0.3, and never applies `MAX_ORDER_SHARES`: a buy is
-bounded only by available cash. Bring it onto the shared helpers before relying on the
-table for it.
+bounded only by available cash. Only its symbol, action and confidence are read by the
+shared `normalize_symbol`, `normalize_action` and `read_confidence` (with the unreadable
+confidence rule above but no counters). Bring the rest onto the shared helpers before
+relying on the table for it.
 
 ---
 
