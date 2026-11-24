@@ -20,6 +20,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -277,6 +278,18 @@ def get_algo_status(session_id: str) -> dict[str, Any]:
     return out
 
 
+def _echo_child_output(text: str) -> None:
+    """Print the child's output without letting it fail the run.
+
+    It now arrives as real UTF-8 (``✅``). A redirected server stdout on Windows
+    is the ANSI code page with strict errors, so a plain ``print`` raised
+    UnicodeEncodeError and the ``except`` below reported a finished run as
+    failed (#688).
+    """
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    print(text.encode(encoding, "backslashreplace").decode(encoding, "replace"))
+
+
 def _run_backtest_background(
     config_path: Path,
     session_id: str,
@@ -289,6 +302,11 @@ def _run_backtest_background(
     project_dir = _PROJECT_DIR
     script = project_dir / "scripts" / "backtest_custom_algo.py"
     env = os.environ.copy()
+    # The engine prints emoji (``✅ LLM initialized``); under a Windows ANSI
+    # code page the child's print raises UnicodeEncodeError. Same pair as the
+    # dashboard backtest child (#653): the child writes UTF-8 and the parent
+    # reads it as such (#688).
+    env["PYTHONIOENCODING"] = "utf-8:backslashreplace"
 
     algo_status["progress"] = "Fetching hourly bars from Alpaca…"
 
@@ -310,15 +328,19 @@ def _run_backtest_background(
             cwd=str(project_dir),
             capture_output=True,
             text=True,
+            # Named, not the locale's: on Windows that is the ANSI code page,
+            # which cannot decode the child's UTF-8.
+            encoding="utf-8",
+            errors="replace",
             timeout=3600,
             env=env,
         )
 
         print("=== CUSTOM ALGO BACKTEST ===")
         if proc.stdout:
-            print(proc.stdout)
+            _echo_child_output(proc.stdout)
         if proc.stderr:
-            print(proc.stderr)
+            _echo_child_output(proc.stderr)
 
         result_path = config_path.with_suffix(".result.json")
         if proc.returncode != 0:
