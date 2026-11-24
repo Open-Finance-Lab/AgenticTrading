@@ -14036,6 +14036,9 @@ html[data-nav-page="home"] #homeView .home-landing-board[data-home-board-slide="
 /* Interrupted backtests (partial-result recovery): the run ended early
    through no strategy fault — grey, not the red of a failure. */
 .backtest-config-status.is-interrupted{color:#9fb6d4}
+.research-questions{margin:14px 0 0;padding:12px 14px 2px;border:1px solid rgba(148,163,184,.22);border-radius:10px;background:rgba(2,8,23,.25);min-width:0}
+.research-questions legend{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;padding:0 6px;font-size:13px;font-weight:600;color:#bfe8f7}
+.research-questions-note{font-size:11px;font-weight:400;color:var(--text-muted, #94a3b8)}
 .research-advanced{margin:14px 0 0;border:1px solid rgba(103,232,249,.28);border-radius:10px;background:rgba(103,232,249,.04);overflow:hidden}
 .research-advanced summary{display:flex;align-items:center;gap:10px;padding:11px 14px;font-size:13px;font-weight:600;color:#bfe8f7;cursor:pointer;user-select:none;list-style:none;transition:background .12s ease}
 .research-advanced summary:hover{background:rgba(103,232,249,.08)}
