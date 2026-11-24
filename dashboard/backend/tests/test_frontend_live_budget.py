@@ -94,7 +94,7 @@ def test_last_nightly_run_copy_names_the_day_outcome_and_reason():
     )
     assert out["copy"] == [
         "Aug 27 · completed",
-        "Aug 27 · failed: market data was missing for a session",
+        "Aug 27 · failed: market data was missing",
         "Aug 27 · paused: monthly model budget used up",
         "Aug 27 · failed: a request timed out",
         "Aug 27 · failed: an internal error",
