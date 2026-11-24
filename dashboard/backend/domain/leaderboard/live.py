@@ -464,10 +464,11 @@ def live_roster_refusal(
 ) -> Optional[str]:
     """Why ``entry_id`` is not on the board month's Live roster, or None if it is.
 
-    Names the one cause that applies, checked in this order: no ``llm_agent``
-    entry with that id in leaderboard.json (a typo, or a baseline); the id is
-    not in ``LIVE_MODEL_IDS``; its ``live_from`` month is after the board
-    month. ``config`` and ``month_start`` are read as in ``live_board_strategies``.
+    Names the one cause that applies, checked in this order: no entry with
+    that id in leaderboard.json (a typo); the entry's ``strategy`` is not
+    ``llm_agent`` (a baseline, or a misspelled strategy); the id is not in
+    ``LIVE_MODEL_IDS``; its ``live_from`` month is after the board month.
+    ``config`` and ``month_start`` are read as in ``live_board_strategies``.
     """
     cfg = config or lb_service.load_leaderboard_config()
     entry = next(
@@ -477,8 +478,8 @@ def live_roster_refusal(
         return f"'{entry_id}' is not an entry in leaderboard.json."
     if entry.get("strategy") != "llm_agent":
         return (
-            f"'{entry_id}' is a baseline (strategy={entry.get('strategy')}), "
-            "not an llm_agent entry; only LLM entries are deployed."
+            f"'{entry_id}' has strategy={entry.get('strategy')!r}, not "
+            "llm_agent; only LLM entries are deployed."
         )
     if entry_id not in LIVE_MODEL_IDS:
         return f"'{entry_id}' is not in LIVE_MODEL_IDS, so it is not on the Live roster."

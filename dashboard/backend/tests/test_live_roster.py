@@ -206,10 +206,21 @@ def test_the_deploy_cli_names_a_typo_as_a_missing_entry(monkeypatch, capsys):
 def test_the_deploy_cli_names_an_llm_entry_off_the_roster(monkeypatch, capsys):
     cfg = lb_service.load_leaderboard_config()
     off_roster = next(
-        s["id"]
-        for s in cfg["strategies"]
-        if s.get("strategy") == "llm_agent" and s["id"] not in live.LIVE_MODEL_IDS
+        (
+            s["id"]
+            for s in cfg["strategies"]
+            if s.get("strategy") == "llm_agent" and s["id"] not in live.LIVE_MODEL_IDS
+        ),
+        None,
     )
+    if off_roster is None:
+        # Every committed LLM entry is live: take one off the roster instead.
+        off_roster = "deepseek_v4_pro"
+        monkeypatch.setattr(
+            live,
+            "LIVE_MODEL_IDS",
+            tuple(i for i in live.LIVE_MODEL_IDS if i != off_roster),
+        )
     out = _refused_by_the_deploy_cli(monkeypatch, capsys, cfg, off_roster)
     assert f"'{off_roster}' is not in LIVE_MODEL_IDS" in out
     assert "live_from" not in out
@@ -218,8 +229,17 @@ def test_the_deploy_cli_names_an_llm_entry_off_the_roster(monkeypatch, capsys):
 def test_the_deploy_cli_names_a_baseline_as_not_deployable(monkeypatch, capsys):
     cfg = lb_service.load_leaderboard_config()
     out = _refused_by_the_deploy_cli(monkeypatch, capsys, cfg, "spy_index")
-    assert "'spy_index' is a baseline" in out
-    assert "not an llm_agent entry" in out
+    strategy = next(
+        s["strategy"] for s in cfg["strategies"] if s["id"] == "spy_index"
+    )
+    assert f"'spy_index' has strategy={strategy!r}, not llm_agent" in out
+
+
+def test_the_deploy_cli_names_a_misspelled_strategy(monkeypatch, capsys):
+    cfg = _config_with("deepseek_v4_pro", strategy="llm-agent")
+    out = _refused_by_the_deploy_cli(monkeypatch, capsys, cfg, "deepseek_v4_pro")
+    assert "'deepseek_v4_pro' has strategy='llm-agent', not llm_agent" in out
+    assert "baseline" not in out
 
 
 def test_the_roster_refusal_is_none_for_a_live_entry():
