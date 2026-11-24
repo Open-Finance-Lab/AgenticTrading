@@ -504,6 +504,7 @@ def _simulate_windows(monkeypatch, win32):
     from dashboard.backend.infrastructure import process_jobs
 
     monkeypatch.setattr(process_jobs, "_IS_WINDOWS", True)
+    monkeypatch.setattr(process_jobs, "_warned", set())
     monkeypatch.setattr(process_jobs, "_api", lambda: win32)
     monkeypatch.setattr(process_jobs, "_nt", lambda: win32)
     return process_jobs
@@ -546,6 +547,26 @@ def test_a_child_that_cannot_be_resumed_is_killed_not_left_hanging(monkeypatch):
     with pytest.raises(OSError, match="0xC0000022"):
         process_jobs.start_in_kill_job(child)
     assert child.killed == 1
+    assert win32.calls[-1] == ("close", 7001)
+
+
+def test_a_refused_kill_falls_back_to_the_job_and_says_so(monkeypatch):
+    """A child that can be neither resumed nor killed must not be reported as
+    killed: the job gets a try, and the message says it may still be there."""
+    win32 = _FakeWin32(resume_status=-1073741790)  # STATUS_ACCESS_DENIED
+    terminated = []
+    win32.TerminateJobObject = lambda job, code: terminated.append(job) or False
+    process_jobs = _simulate_windows(monkeypatch, win32)
+
+    class _Unkillable(_SuspendedChild):
+        pid = 31337
+
+        def kill(self):
+            raise PermissionError("access denied")
+
+    with pytest.raises(OSError, match="pid 31337 may still be suspended"):
+        process_jobs.start_in_kill_job(_Unkillable())
+    assert terminated == [7001]
     assert win32.calls[-1] == ("close", 7001)
 
 
@@ -755,6 +776,9 @@ def test_the_child_leads_a_console_group_only_where_one_exists(monkeypatch, flag
         monkeypatch.delattr(subprocess, "CREATE_NEW_PROCESS_GROUP", raising=False)
     else:
         monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", flag, raising=False)
+    # Only the console-group bit is under test; on Windows the suspended-start
+    # bit is OR'd in too (covered by the launch test above).
+    monkeypatch.setattr(bt.process_jobs, "SUSPENDED_START_FLAG", 0)
     seen = {}
     child = FakeChild()
 

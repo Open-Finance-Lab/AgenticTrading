@@ -150,8 +150,10 @@ def start_in_kill_job(process: Any) -> Optional[int]:
     sweep, not the run. Assigning first means everything the child ever starts
     is in the job, however fast it starts it (#717).
 
-    Raises OSError if a live child cannot be resumed, after killing it: a child
-    left suspended would hold its slot silently until the run's timeout.
+    Raises OSError if a live child cannot be resumed, after killing it (or its
+    job, if the kill is refused): the caller never reaches its timeout, so
+    nothing else would end a child left suspended. If neither kill works the
+    message says the child may still be suspended.
     """
     job = assign_kill_job(process)
     if not _IS_WINDOWS:
@@ -166,16 +168,28 @@ def start_in_kill_job(process: Any) -> Optional[int]:
         failure = str(exc)
     if failure is None:
         return job
-    if process.poll() is not None:
+    try:
+        exited = process.poll() is not None
+    except Exception:  # cannot tell: treat it as alive and end it below
+        exited = False
+    if exited:
         # Already gone (killed from outside while suspended): nothing to hang.
         # Its exit code tells the run what happened, better than this would.
         return job
     try:
         process.kill()  # TerminateProcess works on a suspended process
+        killed = True
     except OSError:
-        pass
+        # The job may still be allowed to end what the process handle cannot.
+        killed = terminate_job(job)
     close_job(job)
-    raise OSError(f"could not resume the backtest child ({failure}); it was killed")
+    if killed:
+        raise OSError(f"could not resume the child process ({failure}); it was killed")
+    pid = getattr(process, "pid", None)
+    raise OSError(
+        f"could not resume the child process ({failure}) or kill it; "
+        f"pid {pid} may still be suspended"
+    )
 
 
 def terminate_job(job: Optional[int]) -> bool:

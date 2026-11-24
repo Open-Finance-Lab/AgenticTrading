@@ -3570,7 +3570,7 @@ def _run_backtest_subprocess(
         creationflags=console_group_flag | process_jobs.SUSPENDED_START_FLAG,
     )
     # First, before anything else can raise: until this returns, the child is
-    # suspended, and a child nobody resumes hangs to the run's timeout.
+    # suspended, and a raise before the wait below leaves no timeout to end it.
     try:
         kill_job = process_jobs.start_in_kill_job(process)
     except OSError:  # it could not be resumed; already killed
