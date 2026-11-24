@@ -20,9 +20,9 @@ signed in and to choose how the model calls are paid for, in the same dialog:
 saved and Credits are unavailable, **Go to API Keys** takes you to where keys
 are stored. See :doc:`credits_billing` for how each option is charged. Runs where
 no AI model is involved (rule-based decisions) work without signing in. The
-hosted AI Hedge Fund runtime needs you to sign in too, but shows no billing
-choice: its model is managed by the platform and is always paid for with ATL
-Credits.
+hosted AI Hedge Fund and TradingAgents runtimes need you to sign in too, but
+show no billing choice: their model is managed by the platform and is always
+paid for with ATL Credits.
 
 A run does not start pricing hours the moment you click. The card names the
 stage it is in while it gets there — ``Loading market data``, then
@@ -65,7 +65,7 @@ without opening it:
    **U.S.**, **China A-Share**) narrow it to one market.
 
 **Open Agents**
-   Open-source trading agents such as AI Hedge Fund. Add them from
+   Open-source trading agents such as AI Hedge Fund and TradingAgents. Add them from
    **Community**, then customize and backtest them.
 
 **Research Agents**
