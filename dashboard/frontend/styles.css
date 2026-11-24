@@ -4327,7 +4327,7 @@ a.header-brand:hover .title-section h1 {
     color: #38bdf8;
 }
 
-/* Live Trading board states. `preview` deliberately borrows the warning colour
+/* Live board states. `preview` deliberately borrows the warning colour
    rather than a neutral grey: it is the badge saying the numbers beside it are
    not real, which is a louder claim than "idle". */
 .status-badge.preview {
@@ -13856,7 +13856,7 @@ html[data-nav-page="home"] #homeView .home-landing-board[data-home-board-slide="
     font-size: 11px;
     color: rgba(148, 163, 184, 0.65);
 }
-/* Live Trading Leaderboard (Phase 0) — scoped so contest/daily CSS stays put */
+/* Live Leaderboard (Phase 0) — scoped so contest/daily CSS stays put */
 .live-phase-banner {
     margin: 8px 0 0;
     padding: 10px 12px;

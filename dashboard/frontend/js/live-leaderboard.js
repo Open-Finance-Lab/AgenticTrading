@@ -289,14 +289,15 @@ function updateLiveHeader(payload) {
       );
     } else if (!liveHasPrintedModel(payload.entries)) {
       // A lagging baseline is not frozen through that date: the catching-up
-      // line names it, with its own date, after the frozen one.
+      // line names it, with its own date, after the frozen one. With no ranked
+      // row (has_prints false) no baseline is frozen at all, so the frozen line
+      // is dropped and the catching-up line leads.
       const behind = liveCatchingUpBanner(payload.entries);
+      const models = 'Model curves appear once the nightly refresh deploys them; they are never computed on page load.';
       banner.hidden = false;
-      banner.textContent = (
-        `Baselines frozen through ${status.frozen_through}. ` +
-        'Model curves appear once the nightly refresh deploys them; they are never computed on page load.' +
-        (behind ? ` ${behind}` : '')
-      );
+      banner.textContent = status.has_prints
+        ? `Baselines frozen through ${status.frozen_through}. ${models}${behind ? ` ${behind}` : ''}`
+        : `${behind ? `${behind} ` : ''}${models}`;
     } else if (liveCatchingUpBanner(payload.entries)) {
       banner.hidden = false;
       banner.textContent = liveCatchingUpBanner(payload.entries);

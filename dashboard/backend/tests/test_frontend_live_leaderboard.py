@@ -849,6 +849,31 @@ def test_a_catching_up_baseline_is_named_when_no_model_has_printed_yet():
 
 
 @_needs_node
+def test_no_baseline_is_called_frozen_when_no_row_is_ranked():
+    """has_prints false with a catching-up baseline and every model pending:
+    nothing is frozen through frozen_through, so the banner must not say the
+    baselines are. The catching-up line leads instead."""
+    spy_pending = _catching_up_entry(
+        "spy_index", "SPY", "pending", value=None, snapshot_end=None, is_model=False
+    )
+    equal_weight = _catching_up_entry(
+        "equal_weight_djia", "Equal Weight DJIA", "catching_up",
+        value=100500.0, snapshot_end="2026-08-15", is_model=False,
+    )
+    payload = _catching_up_payload(
+        spy_pending, equal_weight, _deepseek("pending", value=None, snapshot_end=None)
+    )
+    payload["live_status"]["has_prints"] = False
+    out = _render_catching_up_board(payload, "equal_weight_djia")
+    assert "Baselines frozen" not in out["banner"]
+    assert out["banner"] == (
+        "Equal Weight DJIA is catching up (through 2026-08-15): it is shown but "
+        "not ranked until it reaches the latest session. Model curves appear once "
+        "the nightly refresh deploys them; they are never computed on page load."
+    )
+
+
+@_needs_node
 def test_a_board_whose_only_prints_are_catching_up_is_not_called_empty():
     """live_status.has_prints counts ranked (frozen) rows only, as models_cached
     did, so a board whose newest run could not plot and whose other rows are
