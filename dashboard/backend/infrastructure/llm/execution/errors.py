@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 # ``RetryHint`` lives in the leaf ``http_policy``; re-exported here.
 from dashboard.backend.infrastructure.llm.http_policy import RetryHint
+
+if TYPE_CHECKING:
+    from dashboard.backend.infrastructure.llm.execution.models import (
+        LLMExecutionResult,
+        LLMUsage,
+    )
 
 
 class ExecutionErrorCategory(StrEnum):
@@ -89,6 +96,15 @@ class LLMExecutionError(RuntimeError):
         # Set by ``for_empty_reply``. A second axis, like ``retry_hint``:
         # the category stays RESPONSE_INVALID for every consumer that maps it.
         self.empty_reply = False
+        # Also set by ``for_empty_reply``: what the provider billed for the
+        # textless reply, so the service can settle it rather than release
+        # the hold at zero (#556). ``None`` when no usage came back.
+        self.billed_usage: LLMUsage | None = None
+        self.billed_cost_usd: float | None = None
+        # Set by the service once it has billed an empty reply: the call's
+        # evidence (usage, cost, debit), so the run summary and analytics
+        # count it like any billed call although no answer came back.
+        self.billed_result: LLMExecutionResult | None = None
         super().__init__(self.safe_message)
 
     @classmethod
@@ -96,7 +112,12 @@ class LLMExecutionError(RuntimeError):
         return cls(category)
 
     @classmethod
-    def for_empty_reply(cls) -> "LLMExecutionError":
+    def for_empty_reply(
+        cls,
+        *,
+        usage: LLMUsage | None = None,
+        provider_cost_usd: float | None = None,
+    ) -> "LLMExecutionError":
         """The provider answered with no text, typically because reasoning spent the ceiling.
 
         RESPONSE_INVALID also covers contract breaks that fail identically
@@ -106,9 +127,15 @@ class LLMExecutionError(RuntimeError):
         asking again, so callers retry on ``is_empty_reply``, never on the
         bare category: retrying those others billed the same failure again or
         logged a request bug as an empty model reply (#600).
+
+        The reply is still billed upstream -- the reasoning that spent the
+        ceiling is output -- so an adapter passes the usage it read, and the
+        service settles it before raising this again (#556).
         """
         error = cls(ExecutionErrorCategory.RESPONSE_INVALID)
         error.empty_reply = True
+        error.billed_usage = usage
+        error.billed_cost_usd = provider_cost_usd
         return error
 
     @classmethod
@@ -160,6 +187,26 @@ def is_empty_reply(error: BaseException) -> bool:
     )
 
 
+def empty_reply_usage(error: BaseException) -> "LLMUsage | None":
+    """The tokens the provider reported for an empty reply, or None.
+
+    For the run's own counters (calls, tokens): an empty reply is still a
+    generation the provider billed (#556), so a caller that counts received
+    responses counts this one too. None for any other error, and for an empty
+    reply that reported no usage or no tokens.
+    """
+    if not is_empty_reply(error):
+        return None
+    usage = getattr(error, "billed_usage", None)
+    if (
+        usage is None
+        or not getattr(usage, "usage_available", False)
+        or (usage.input_tokens <= 0 and usage.output_tokens <= 0)
+    ):
+        return None
+    return usage
+
+
 # The ``reason`` token ``run_failed_line`` writes for an empty reply.
 EMPTY_REPLY_REASON = "empty_reply"
 
@@ -185,6 +232,7 @@ __all__ = [
     "ExecutionErrorCategory",
     "LLMExecutionError",
     "RetryHint",
+    "empty_reply_usage",
     "is_empty_reply",
     "is_transient_provider_failure",
     "run_failed_line",

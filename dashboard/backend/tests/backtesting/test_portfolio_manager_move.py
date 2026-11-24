@@ -420,6 +420,105 @@ def test_strict_llm_carries_out_sized_orders_with_unreadable_confidence():
     assert pm.llm_decisions == 1
     assert pm.confidence_skipped_steps == 0
 
+
+_NO_SIZE = object()
+
+
+def _llm_buy_pm(size, *, confidence=0.9, strict_llm=False):
+    action = {"symbol": "AAPL", "action": "buy", "confidence": confidence, "reasoning": "x"}
+    if size is not _NO_SIZE:
+        action["position_size"] = size
+    return _llm_decide([action], strict_llm=strict_llm)
+
+
+def _llm_buy_shares(size):
+    return [a["shares"] for a in _llm_buy_pm(size)[1]["actions"]]
+
+
+def _assert_buy_refused(pm, requested=0):
+    """The skipped BUY left an ``invalid_quantity`` rejection on the ledger,
+    as a refused SELL does: a print alone is invisible from a dashboard run."""
+    [event] = pm.order_events
+    assert (event["symbol"], event["side"], event["status"]) == ("AAPL", "BUY", "rejected")
+    assert event["reason"] == portfolio_manager.ORDER_SIZE_REFUSED_REASON
+    assert (event["executed_shares"], event["requested_shares"]) == (0, requested)
+    [rejection] = pm.rejected_orders
+    assert (rejection["action"], rejection["reason"]) == ("buy", "invalid_quantity")
+
+
+@pytest.mark.parametrize("size", [0.6, 0.99])
+def test_llm_buy_size_under_one_share_is_skipped_not_auto_sized(size, capsys):
+    """int() truncated a size under one share to 0, and 0 means "size it from
+    confidence": the model asked for 0.6 of a share and got an engine-chosen
+    buy. It asked for an amount, so nothing is bought in its name instead."""
+    pm, result = _llm_buy_pm(size)
+    assert result["actions"] == []
+    assert "rounds to 0 shares" in capsys.readouterr().out
+    _assert_buy_refused(pm, requested=size)
+    assert pm.llm_decisions == 1
+
+
+@pytest.mark.parametrize("size", [-0.5, -3])
+def test_llm_buy_size_not_positive_is_skipped_not_auto_sized(size, capsys):
+    """-0.5 truncated to 0 and was auto-sized like a missing size; -3 was
+    skipped but logged as "insufficient cash: need $-300"."""
+    pm, result = _llm_buy_pm(size)
+    assert result["actions"] == []
+    assert "not positive" in capsys.readouterr().out
+    _assert_buy_refused(pm)
+
+
+@pytest.mark.parametrize(
+    "size", [True, False, [], {}, [5], "abc", float("nan"), float("inf")]
+)
+def test_llm_buy_unparseable_size_skips_only_that_action(size, capsys):
+    """int(True) is 1 and int(False) is 0: neither is a share count. An empty
+    list or dict read as "given" but then reached float() outside any guard,
+    and the TypeError threw the whole decision into the rule-based fallback."""
+    pm, result = _llm_buy_pm(size)
+    assert result["actions"] == []
+    assert "unparseable position_size" in capsys.readouterr().out
+    _assert_buy_refused(pm)
+    # The step is still the model's, not a rule-based fallback.
+    assert pm.llm_decisions == 1
+
+
+@pytest.mark.parametrize("size", [_NO_SIZE, 0, 0.0, "0", None, ""])
+def test_llm_buy_without_size_is_still_confidence_sized(size):
+    pm, result = _llm_buy_pm(size)
+    shares = [a["shares"] for a in result["actions"]]
+    assert len(shares) == 1 and shares[0] > 0
+    assert pm.rejected_orders == []
+
+
+def test_llm_buy_fractional_size_above_one_truncates():
+    assert _llm_buy_shares(10.7) == [10]
+
+
+def test_lot_market_keeps_a_fractional_buy_for_the_executor():
+    """A-share runs keep the float, so 0.6 reaches the executor's lot check
+    instead of being refused or confidence-sized by the gate."""
+    pm = CanonicalPortfolioManager(100000, lot_size=100)
+    fraction, negative, missing = (pm._read_buy_size(v) for v in (0.6, -0.5, None))
+
+    assert fraction == (0.6, None, 0.6)
+    assert negative[1] == "invalid position_size -0.5, not positive"
+    assert missing == (0, None, 0.0)
+
+
+@pytest.mark.parametrize("size", [0.6, -0.5, False])
+def test_strict_llm_does_not_read_a_given_size_as_no_size(size, capsys):
+    """The strict pre-check and the loop share one size reading: a buy whose
+    given size cannot be carried out is skipped and recorded for its size,
+    not rejected as "a buy with no size", even beside an unreadable confidence."""
+    pm, result = _llm_buy_pm(size, confidence=25, strict_llm=True)
+    assert result["actions"] == []
+    out = capsys.readouterr().out
+    assert "no 0-1 confidence" not in out
+    _assert_buy_refused(pm, requested=0.6 if size == 0.6 else 0)
+    assert pm.unusable_confidence_skipped == 0
+
+
 def test_strict_llm_rejects_missing_client_without_rule_fallback(monkeypatch):
     pm = CanonicalPortfolioManager(100000)
     fallback_calls = []

@@ -28,6 +28,7 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
 from dashboard.backend.infrastructure.llm.execution.errors import (
     ExecutionErrorCategory,
     LLMExecutionError,
+    empty_reply_usage,
     is_empty_reply,
     is_transient_provider_failure,
 )
@@ -851,8 +852,9 @@ def _retry_with_recovery_budget(client, *, model: str, prompt: str):
 class _StepUsage:
     """Calls and token deltas for the responses a pipeline actually received.
 
-    Only responses that came back are recorded — an attempt that raised was
-    released by the execution service and never billed.
+    Responses that came back are recorded, and so is an empty reply that
+    raised with the usage its provider billed (#556); any other attempt that
+    raised generated nothing and is not counted.
     """
 
     __slots__ = ("calls", "input_tokens", "output_tokens")
@@ -869,6 +871,15 @@ class _StepUsage:
         self.input_tokens += in_delta
         self.output_tokens += out_delta
         return out_delta
+
+    def record_empty_reply(self, error: BaseException) -> None:
+        """Count an empty reply the provider billed; anything else is a no-op."""
+        billed = empty_reply_usage(error)
+        if billed is None:
+            return
+        self.calls += 1
+        self.input_tokens += billed.input_tokens
+        self.output_tokens += billed.output_tokens
 
     @property
     def totals(self) -> Tuple[int, int]:
@@ -1077,6 +1088,7 @@ def run_pipeline_decision(
             # rest of RESPONSE_INVALID fails identically on a retry.
             if not is_empty_reply(first_error):
                 raise
+            usage.record_empty_reply(first_error)
             print(
                 "   ⚠️  Empty model response; retrying with reasoning preserved "
                 f"and max_tokens={RECOVERY_MAX_OUTPUT_TOKENS}"
@@ -1112,6 +1124,7 @@ def run_pipeline_decision(
                 # failure the first attempt would have raised too.
                 if not is_empty_reply(retry_error):
                     raise
+                usage.record_empty_reply(retry_error)
                 print("   ⚠️  Retry returned no usable response; keeping the first attempt")
             if retry_response is not None:
                 usage.record(retry_response)
