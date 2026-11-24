@@ -77,8 +77,17 @@ def test_every_live_model_is_priced_at_its_listed_rate():
 def test_the_committed_live_config_raises_no_warning(capsys):
     """A malformed live_from or live_overrides is ignored with a WARNING at
     runtime, because the public GET must not fail on config. Committed, it is
-    a bug: the entry would trade at once, or on its shared values."""
-    _live_entries()
+    a bug: the entry would trade at once, or on its shared values. Walks the
+    baselines too: either key on one is ignored with the same WARNING. The
+    board skips an LLM entry off ``LIVE_MODEL_IDS`` before reading either key,
+    so those are parsed here directly: a typo must fail now, not when the entry
+    joins the roster."""
+    cfg = lb_service.load_leaderboard_config()
+    live.live_board_strategies(cfg, month_start=_EVERY_JOIN_OPEN)
+    for entry in cfg["strategies"]:
+        if entry.get("strategy") == "llm_agent":
+            live._live_from_month(entry)
+            live._with_live_overrides(entry)
     assert "WARNING: live." not in capsys.readouterr().out
 
 
@@ -96,4 +105,8 @@ def test_roster_mentions_name_the_constant_not_the_models(path):
     text = path.read_text(encoding="utf-8")
     assert "LIVE_MODEL_IDS" in text
     assert "Nemotron" not in text
-    assert not re.search(r"\b\d+ models\b", text)
+    assert not re.search(
+        r"\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten) models\b",
+        text,
+        re.IGNORECASE,
+    )
