@@ -11288,6 +11288,7 @@ function viewParamForNavState(state) {
     if (state.page === 'playground') {
         if (state.playgroundTab === 'backtest') return 'backtest';
         if (state.playgroundTab === 'paper') return 'paper';
+        if (state.playgroundTab === 'portfolio-management') return 'portfolio-management';
         return 'agents';
     }
     if (state.page === 'competition') {
@@ -11579,10 +11580,16 @@ function showPlaygroundPanel(tab) {
     const backtest = document.querySelector('.playground-backtest-panel')
       || document.querySelector('.main-container');
     const paper = document.getElementById('paperTradingView');
+    const portfolioManagement = document.getElementById('playgroundPortfolioManagementPanel');
 
     if (agents) agents.style.display = tab === 'agents' ? 'block' : 'none';
     if (backtest) backtest.style.display = tab === 'backtest' ? 'grid' : 'none';
     if (paper) paper.style.display = tab === 'paper' ? 'block' : 'none';
+    if (portfolioManagement) portfolioManagement.style.display = tab === 'portfolio-management' ? 'block' : 'none';
+
+    // The recorded demo owns document keys and timers while it shows; any other
+    // tab must release them (js/portfolio-management.js).
+    if (tab !== 'portfolio-management') window.PortfolioManagementDemo?.hide();
 
     if (tab === 'backtest') {
         currentMode = 'backtest';
@@ -11592,6 +11599,9 @@ function showPlaygroundPanel(tab) {
     } else if (tab === 'paper') {
         currentMode = 'paper';
         loadPaperTradingData();
+    } else if (tab === 'portfolio-management') {
+        currentMode = 'portfolio-management';
+        showPortfolioManagementDemo(portfolioManagement);
     } else {
         currentMode = 'agents';
         // Cache-only repaint so the panel is not blank while agents load;
@@ -11609,6 +11619,28 @@ function showPlaygroundPanel(tab) {
     }
 
     persistNavigation();
+}
+
+// The Portfolio Management tab plays a fixed recording (js/portfolio-management.js).
+// A script that failed to load or a throw on first show must leave a visible
+// message, not an empty panel that looks like a slow load.
+function showPortfolioManagementDemo(panel) {
+    if (!panel) return;
+    // A first show() that throws after attachShadow leaves a root with no <slot>, which
+    // hides the panel's own text, so the message goes wherever the panel renders.
+    const showFailure = () => {
+        (panel.shadowRoot || panel).textContent = 'Portfolio Management did not load. Reload the page to try again.';
+    };
+    if (!window.PortfolioManagementDemo) {
+        showFailure();
+        return;
+    }
+    try {
+        window.PortfolioManagementDemo.show(panel);
+    } catch (err) {
+        console.error('Portfolio Management demo failed to show', err);
+        showFailure();
+    }
 }
 
 function showCompetitionPanel(tab) {
@@ -11765,9 +11797,11 @@ function navigateToPage(page, options = {}) {
     hide(leaderboardView);
     hide(document.getElementById('liveLeaderboardView'));
     hide(document.getElementById('playgroundAgentsPanel'));
+    hide(document.getElementById('playgroundPortfolioManagementPanel'));
     hide(document.getElementById('researchWorkbenchView'));
     hide(document.getElementById('competitionParticipantsPanel'));
     hide(document.getElementById('competitionAboutPanel'));
+    if (page !== 'playground') window.PortfolioManagementDemo?.hide();
 
     if (page === 'home') {
         currentMode = 'home';
@@ -13381,9 +13415,22 @@ function stopResearchPolling() {
   }
 }
 
+// Catalog runtime estimates by template, from the last shelf fetch. The
+// workbench falls back to these when the agent's own manifest omits one, so
+// the card and the workbench quote the same minutes.
+const researchCatalogRuntime = new Map();
+
 async function fetchResearchAgents() {
   const data = await API.get(`${RESEARCH_API}/agents`);
-  return Array.isArray(data?.agents) ? data.agents : [];
+  const agents = Array.isArray(data?.agents) ? data.agents : [];
+  researchCatalogRuntime.clear();
+  agents.forEach((agent) => {
+    const seconds = Number(agent?.research?.estimated_runtime_seconds);
+    if (agent?.template_id && Number.isFinite(seconds) && seconds > 0) {
+      researchCatalogRuntime.set(agent.template_id, seconds);
+    }
+  });
+  return agents;
 }
 
 function researchStatusLabel(status) {
@@ -13589,36 +13636,65 @@ async function openResearchWorkbench(templateId) {
 
   nameEl.textContent = manifest.name || templateId;
   descEl.textContent = manifest.description || '';
-  const runtimeMin = Math.max(1, Math.round((manifest.estimated_runtime_seconds || 300) / 60));
+  const manifestRuntime = Number(manifest.estimated_runtime_seconds);
+  const runtimeSeconds = (Number.isFinite(manifestRuntime) && manifestRuntime > 0 ? manifestRuntime : 0)
+    || researchCatalogRuntime.get(templateId)
+    || 300;
+  const runtimeMin = Math.max(1, Math.round(runtimeSeconds / 60));
   metaEl.innerHTML =
     '<svg class="ui-icon research-fact-icon" aria-hidden="true"><use href="#icon-clock"></use></svg> '
     + `~${runtimeMin} min per run · `
     + '<svg class="ui-icon research-fact-icon" aria-hidden="true"><use href="#icon-file-text"></use></svg> '
     + `Output: ${escapeHtml((manifest.output_formats || []).join(' / '))}`;
 
-  // Only required fields show by default; the optional mandate knobs live
-  // behind one disclosure so a run is a two-field form until the user asks
-  // for more. (The dd agent has only 3 fields — 2 required — and typically
-  // nothing to fold; the toggle is hidden when there is nothing to fold.)
+  // Three groups. Required fields first. Optional free-text questions next,
+  // open: they are the mandate (deal background, objectives, terms…), and a
+  // report written without them is generic, so they must not hide behind a
+  // toggle the way a setting can. Optional short settings (language,
+  // currency, dates) fold into Advanced options; the toggle is hidden when
+  // there is nothing to fold.
   const allFields = manifest.settings_schema?.fields || [];
   const primary = allFields.filter((field) => field.required);
-  const optional = allFields.filter((field) => !field.required);
+  const questions = allFields.filter((field) => !field.required && field.type === 'longtext');
+  const optional = allFields.filter((field) => !field.required && field.type !== 'longtext');
+
+  // A placeholder default such as "Not specified" is what the service
+  // substitutes for a blank answer, not an answer to pre-type: shown as hint
+  // text, never as a value the user has to delete first. A blank answer
+  // still submits that default (data-blank-default, read by
+  // submitResearchRun), so the service receives what it did before. Required
+  // fields keep it as a value: blank would fail the required check.
+  const PLACEHOLDER_DEFAULTS = new Set(['not specified', 'none', 'n/a', 'unknown']);
+  const isPlaceholderDefault = (field) => field.type === 'longtext'
+    && !field.required
+    && typeof field.default === 'string'
+    && PLACEHOLDER_DEFAULTS.has(field.default.trim().toLowerCase());
 
   const renderField = (field) => {
-    const value = field.default != null ? String(field.default) : '';
+    const placeholderDefault = isPlaceholderDefault(field);
+    const value = field.default != null && !placeholderDefault ? String(field.default) : '';
+    const hint = field.placeholder || (placeholderDefault ? `Optional. Left blank: ${field.default}` : '');
     const requiredMark = field.required ? ' <span class="research-required">*</span>' : '';
     let control;
     if (field.type === 'longtext') {
-      control = `<textarea id="rf_${escapeHtml(field.id)}" rows="3" placeholder="${escapeHtml(field.placeholder || '')}">${escapeHtml(value)}</textarea>`;
+      const blankDefault = placeholderDefault ? ` data-blank-default="${escapeHtml(field.default)}"` : '';
+      control = `<textarea id="rf_${escapeHtml(field.id)}" rows="3" placeholder="${escapeHtml(hint)}"${blankDefault}>${escapeHtml(value)}</textarea>`;
     } else if (field.type === 'select') {
       control = `<select id="rf_${escapeHtml(field.id)}">${(field.options || []).map((option) => `<option value="${escapeHtml(option)}"${option === value ? ' selected' : ''}>${escapeHtml(option)}</option>`).join('')}</select>`;
     } else {
       control = `<input id="rf_${escapeHtml(field.id)}" type="${field.type === 'date' ? 'date' : field.type === 'number' ? 'number' : 'text'}" value="${escapeHtml(value)}" placeholder="${escapeHtml(field.placeholder || '')}">`;
     }
-    return `<label class="research-field"><span>${escapeHtml(field.label || field.id)}${requiredMark}</span>${control}<small class="research-field-desc">${escapeHtml(field.description || '')}</small></label>`;
+    // Agents often reuse the description as the placeholder; printing it a
+    // second time under a box that already shows it doubles every question.
+    const description = String(field.description || '').trim();
+    const showDescription = description && description !== String(field.placeholder || '').trim();
+    return `<label class="research-field"><span>${escapeHtml(field.label || field.id)}${requiredMark}</span>${control}${showDescription ? `<small class="research-field-desc">${escapeHtml(description)}</small>` : ''}</label>`;
   };
 
   fieldsEl.innerHTML = primary.map(renderField).join('')
+    + (questions.length
+        ? `<fieldset class="research-questions"><legend>Mandate questions <span class="research-questions-note">Optional · the more you answer, the more specific the report</span></legend>${questions.map(renderField).join('')}</fieldset>`
+        : '')
     + (optional.length
         ? `<details class="research-advanced"><summary>Advanced options (${optional.length})</summary>${optional.map(renderField).join('')}</details>`
         : '');
@@ -13691,7 +13767,7 @@ async function submitResearchRun() {
   const settings = {};
   document.querySelectorAll('#researchFormFields [id^="rf_"]').forEach((input) => {
     const key = input.id.slice(3);
-    const value = String(input.value || '').trim();
+    const value = String(input.value || '').trim() || String(input.dataset?.blankDefault || '');
     if (value) settings[key] = value;
   });
   const emailMe = document.getElementById('researchEmailMe')?.checked || false;

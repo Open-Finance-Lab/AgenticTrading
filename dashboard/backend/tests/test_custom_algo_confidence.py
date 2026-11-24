@@ -66,6 +66,11 @@ print(json.dumps({
     "sized_25": shares(confidence=25, position_size=5),
     "unsized_half": shares(confidence=0.5),
     "sized_low": shares(confidence=0.1, position_size=5),
+    "sized_fraction": shares(confidence=0.9, position_size=0.6),
+    "sized_negative": shares(confidence=0.9, position_size=-3),
+    "sized_true": shares(confidence=0.9, position_size=True),
+    "sized_text": shares(confidence=0.9, position_size="abc"),
+    "sized_zero": shares(confidence=0.5, position_size=0),
 }))
 '''
 
@@ -90,7 +95,10 @@ def test_trading_algo_reads_confidence_like_the_backtest_gate():
     """25 used to read as 2500% and buy 500 shares (half the account) where a
     0.25 would not have traded. Unsized buys with no 0-1 confidence are now
     skipped; a buy that names its size trades it; the 0.3 floor still holds
-    for a confidence that can be read."""
+    for a confidence that can be read. Buy sizes follow the gate too (#675):
+    int() made 0.6 and -3 an engine-sized buy and True one share; a size given
+    that cannot be carried out is now skipped, and only a missing or 0 size
+    is sized from confidence."""
     assert _run() == {
         "unsized_25": [],
         "unsized_true": [],
@@ -98,4 +106,10 @@ def test_trading_algo_reads_confidence_like_the_backtest_gate():
         "sized_25": [5],
         "unsized_half": [10],
         "sized_low": [],
+        "sized_fraction": [],
+        "sized_negative": [],
+        "sized_true": [],
+        "sized_text": [],
+        "sized_zero": [10],
     }
+

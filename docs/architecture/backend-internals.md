@@ -18,6 +18,13 @@ Expands the `CLAUDE.md` rule "LLM backtest billing, the live path" (`POST /backt
 
 `_execute_platform` (`infrastructure/llm/execution/service.py`) maps the store's `InsufficientCreditsError` to `INSUFFICIENT_CREDITS` (analytics `credits_insufficient`), not the catch-all `BILLING_FAILED`; the category, the "Not enough ATL Credits..." message and `run_failed_line` live in `infrastructure/llm/execution/errors.py`. The child prints `ERROR: llm.run_failed category=<value>` (`run_failed_line`; fixed tokens, never upstream text); the parent (`_child_llm_failure`) shows the safe message and records the category instead of a traceback tail and `internal_error`. Non-owners see only `_LLM_FAILURE_PUBLIC_ERROR`.
 
+### Empty replies are billed
+
+A reply with no text (reasoning spent the ceiling) is still billed upstream, so the adapters read its usage before raising `LLMExecutionError.for_empty_reply(usage=..., provider_cost_usd=...)`, and `_execute_platform` settles it through `_bill` before re-raising, so the caller's rescue still keys on `is_empty_reply` (#556).
+- **What settles.** Any reported token, prompt included, or a reported cost (OpenRouter's zero-completion waiver reports $0 and settles at $0). No usage, or 0/0 with no cost, is released at zero. A zero-priced route holds nothing, so nothing settles and the error stays retryable instead of becoming `BILLING_FAILED`.
+- **Who counts it.** The settled evidence rides the error as `billed_result` (`LLMEmptyReplyResult`, text pinned empty; BYOK gets one too, ledger untouched). The execution client adds it to `execution_summary()`, `execute()` emits `model_usage_recorded` with outcome `failed` (so the admin cost equals the ledger debit), and `pipeline_runner._StepUsage` and `PortfolioManager.llm_calls` count it through `empty_reply_usage`.
+- **Gemini hold.** Gemini bills thinking as output (`thoughtsTokenCount`, else `totalTokenCount` less the prompt; #657), and `maxOutputTokens` does not reliably bound it, so `output_token_ceiling_for` adds `GEMINI_THINKING_ALLOWANCE_TOKENS` (8192) to the hold on the direct `gemini` lane. The launch preflight prices it the same way through `reservation_ceiling_micro_for`.
+
 ### Welcome grant
 
 `DEFAULT_SIGNUP_CREDIT_CAMPAIGN = "default_signup_credits_v2"` (`domain/credits/service.py`), 8 Credits. Holders of a superseded campaign (v1, 1.5 Credits) do not get v2, because the boot backfill (`backfill_default_signup_credits`, called from `app.py`) replays the campaign over every account. Change an amount under a new campaign key, never in place: the amount is part of the idempotency digest.

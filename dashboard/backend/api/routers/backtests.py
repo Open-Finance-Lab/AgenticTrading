@@ -61,6 +61,7 @@ matplotlib.use("Agg")
 from dashboard.backend.database import db, DB_PATH
 from dashboard.backend.paths import DASHBOARD_DIR, SCRIPTS_DIR, child_python
 from dashboard.backend.middleware import get_session_id_from_request
+from dashboard.backend.infrastructure import process_jobs
 from dashboard.backend.infrastructure.market_data.provider import (
     ALPACA,
     IFIND_ASHARE,
@@ -1433,6 +1434,13 @@ def _clear_live_progress_snapshot(run_id: Optional[str]) -> None:
 # kept alive by membership.
 _CONSOLE_GROUP_LEADERS: "weakref.WeakSet[Any]" = weakref.WeakSet()
 
+# The Windows Job Object each child was placed in (``process_jobs``), so the
+# final sweep can reach a grandchild after the child has exited. The handle
+# is closed by a finalizer on the Popen object, not when the run returns: the
+# cancel route's sweep runs on another thread, often after the worker has
+# seen the child exit, and must still find the job open.
+_KILL_JOBS: "weakref.WeakKeyDictionary[Any, int]" = weakref.WeakKeyDictionary()
+
 
 def _break_console_group(process: Any) -> bool:
     """Windows' SIGTERM-to-the-group: CTRL_BREAK_EVENT to the child's console group.
@@ -1525,11 +1533,14 @@ def _kill_backtest_process_after_grace(
     # is evaluated before ``_killpg``'s own guard can see it -- the
     # AttributeError escaped every caller, turning a timeout into a generic
     # failure and a pre-launch cancel into an error over a closed slot. There
-    # is no group to sweep there (``_resolve_child_pgid`` is None); the
-    # ``kill()`` above is that platform's whole escalation.
+    # is no group to sweep there (``_resolve_child_pgid`` is None).
     sigkill = getattr(signal, "SIGKILL", None)
     if sigkill is not None:
         _killpg(pgid, sigkill)
+    # Windows' group sweep: the child's Job Object. ``kill()`` above reaches the
+    # child alone, and a grandchild that ignored CTRL_BREAK outlived it (#688).
+    # Like the POSIX sweep, it runs even when the child exited in the grace.
+    process_jobs.terminate_job(_KILL_JOBS.get(process))
 
 
 def _stopped_by_signal(returncode: int) -> bool:
@@ -3553,12 +3564,23 @@ def _run_backtest_subprocess(
         # Ignored on non-POSIX platforms.
         start_new_session=True,
         # Windows' counterpart: a console process group of its own, which is
-        # what ``_break_console_group`` signals. 0 everywhere else, where a
-        # non-zero value would be refused.
-        creationflags=console_group_flag,
+        # what ``_break_console_group`` signals. Started suspended, so it can be
+        # put in its kill job before it runs (``start_in_kill_job`` below). Both
+        # are 0 everywhere else, where a non-zero value would be refused.
+        creationflags=console_group_flag | process_jobs.SUSPENDED_START_FLAG,
     )
+    # First, before anything else can raise: until this returns, the child is
+    # suspended, and a raise before the wait below leaves no timeout to end it.
+    try:
+        kill_job = process_jobs.start_in_kill_job(process)
+    except OSError:  # it could not be resumed; already killed
+        _close_child_streams(process)
+        raise
     if console_group_flag:
         _CONSOLE_GROUP_LEADERS.add(process)
+    if kill_job is not None:
+        _KILL_JOBS[process] = kill_job
+        weakref.finalize(process, process_jobs.close_job, kill_job)
     if live_run_id and not _attach_backtest_process(live_run_id, process):
         # A cancel landed between slot acquisition and launch. The slot is
         # already released, so nothing is watching this child — kill it here

@@ -239,6 +239,7 @@ def _deploy_live(args):
         deploy_live_model_increment,
         live_freeze_config,
         live_llm_entries,
+        live_roster_refusal,
     )
 
     if args.start or args.end:
@@ -250,10 +251,10 @@ def _deploy_live(args):
         return None
     entry = next((e for e in live_llm_entries(freeze) if e["id"] == args.entry), None)
     if entry is None:
-        print(
-            f"ERROR: '{args.entry}' is not on the Live roster this month "
-            "(not in LIVE_MODEL_IDS, or its live_from month has not opened)."
+        reason = live_roster_refusal(args.entry, freeze) or (
+            f"'{args.entry}' is not on the Live roster this month."
         )
+        print(f"ERROR: {reason}")
         return None
     return deploy_live_model_increment(
         entry,

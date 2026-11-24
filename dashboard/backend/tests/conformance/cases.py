@@ -1147,10 +1147,10 @@ PREDICTIONS_D: Dict[str, Prediction] = {
     "CA03": _p(FAIL, ("cash", "equity"), ("D13", "D2"),
                "no dividends; the 05-05 orders fill at the 05-05 close"),
     "CA04": _p(NOT_EXPRESSIBLE, defects=("D12", "D13"), note=_NE_ORDERS),
-    "M01": _p(FAIL, ("equity", "initial_equity", "max_drawdown", "avg_cost"), ("D1", "D3", "D14"),
+    "M01": _p(FAIL, ("equity", "initial_equity", "max_drawdown"), ("D1", "D3"),
               "each decision's trade is marked back over earlier bars (engine.py:2267-2302)"),
-    "M02": _p(FAIL, ("avg_cost", "realized_pnl"), ("D14",),
-              "entry_prices is overwritten by each buy (execution.py:631); no realized P&L"),
+    "M02": _p(FAIL, ("realized_pnl",), ("D14",),
+              "no realized P&L (entry_prices now holds the average cost, so avg_cost matches)"),
     "M03": _p(FAIL, ("sharpe",), ("D15",),
               "per-5m returns, ddof 0, rf 0, sqrt(19,656) annualization (metrics.py:17-64)"),
     "M03b": _p(FAIL, ("sharpe",), ("D15",), "an undefined Sharpe is reported as 0 (metrics.py:57-58)"),
@@ -1167,7 +1167,8 @@ PREDICTIONS_DL: Dict[str, Prediction] = {
     "C04": _p(FAIL, ("fills", "orders", "invariants"), ("D18",),
               "a size-0 SELL is the whole position and the batch is cut to one action per symbol"),
     "S01": _p(FAIL, ("fills", "cash", "positions", "avg_cost", "realized_pnl", "equity", "invariants"),
-              ("D9",), "int(position_size) truncates the fractional size to 0"),
+              ("D9",), "int(position_size) truncates the fractional size to 0, so the buy is "
+              "skipped and recorded as an invalid_quantity rejection (o2's repeat folds into o1's)"),
 }
 
 #: Where a run disagreed with the design doc's prediction. Keyed

@@ -241,6 +241,9 @@ class AiHedgeFundSubprocessRunner:
         environment["HOME"] = home_directory or tempfile.gettempdir()
         environment["PYTHON_DOTENV_DISABLED"] = "1"
         environment["PYTHONUNBUFFERED"] = "1"
+        # Set here, not inherited: this is an allowlist. Without it the bridge
+        # writes in the Windows ANSI code page, and ``run`` reads UTF-8 (#688).
+        environment["PYTHONIOENCODING"] = "utf-8:backslashreplace"
         return environment
 
     def run(self, payload: Dict[str, Any], *, timeout_seconds: int) -> Dict[str, Any]:
@@ -278,6 +281,10 @@ class AiHedgeFundSubprocessRunner:
                     cwd=temp_dir,
                     capture_output=True,
                     text=True,
+                    # Named, not the locale's: on Windows that is the ANSI code
+                    # page, which cannot decode the child's UTF-8.
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=timeout_seconds,
                     env=environment,
                 )

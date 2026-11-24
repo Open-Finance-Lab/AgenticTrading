@@ -21,6 +21,7 @@ import signal
 import subprocess
 import sys
 import uuid
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -187,6 +188,72 @@ def test_algo_backtest_launches_on_child_python(tmp_path, monkeypatch):
     assert algo_service.algo_status["running"] is False
 
 
+def test_algo_backtest_has_utf8_pipes(tmp_path, monkeypatch):
+    """#688: the engine prints emoji, so under a cp1252 locale the child raised
+    UnicodeEncodeError and the parent decoded with the locale codec."""
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="boom")
+
+    monkeypatch.setattr(algo_service, "child_python", lambda: "/opt/server/python")
+    monkeypatch.setattr(algo_service.subprocess, "run", fake_run)
+    monkeypatch.setattr(algo_service, "algo_status", {"running": True, "error": None})
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
+
+    algo_service._run_backtest_background(
+        tmp_path / "algo.json", "sess", "team", "sub", "2026-01-01", "2026-01-02"
+    )
+
+    assert (seen["encoding"], seen["errors"]) == ("utf-8", "replace")
+    # Overrides whatever the operator's environment said.
+    assert seen["env"]["PYTHONIOENCODING"] == "utf-8:backslashreplace"
+
+
+def test_ai_hedge_fund_bridge_has_utf8_pipes(tmp_path, monkeypatch):
+    """#688: same as the Trading Algo child. The bridge's environment is an
+    allowlist, so the encoding is set there, not inherited."""
+    runner = ahf_adapter.AiHedgeFundSubprocessRunner({"PYTHONIOENCODING": "cp1252"})
+    monkeypatch.setattr(runner, "_python_executable", lambda: Path("/opt/ahf/python"))
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        seen.update(kwargs)
+        raise OSError("stop here")
+
+    monkeypatch.setattr(ahf_adapter.subprocess, "run", fake_run)
+
+    with pytest.raises(ahf_adapter.AiHedgeFundRuntimeError):
+        runner.run({}, timeout_seconds=5)
+
+    assert (seen["encoding"], seen["errors"]) == ("utf-8", "replace")
+    assert seen["env"]["PYTHONIOENCODING"] == "utf-8:backslashreplace"
+
+
+def test_algo_child_output_cannot_fail_the_run_on_a_cp1252_stdout(tmp_path, monkeypatch):
+    """#688: the child's output is now real UTF-8; echoing it to a redirected
+    cp1252 server stdout (strict errors) must not turn into the run's error."""
+    import io
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, stdout="\u2705 LLM initialized", stderr="")
+
+    monkeypatch.setattr(algo_service, "child_python", lambda: "/opt/server/python")
+    monkeypatch.setattr(algo_service.subprocess, "run", fake_run)
+    monkeypatch.setattr(algo_service, "algo_status", {"running": True, "error": None})
+    server_log = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+    monkeypatch.setattr(sys, "stdout", server_log)
+
+    algo_service._run_backtest_background(
+        tmp_path / "algo.json", "sess", "team", "sub", "2026-01-01", "2026-01-02"
+    )
+
+    assert algo_service.algo_status["error"].startswith("Backtest failed (code 1)")
+    server_log.flush()
+    assert b"\\u2705 LLM initialized" in server_log.buffer.getvalue()
+
+
 def test_algo_resolver_failure_still_releases_the_single_flight(tmp_path, monkeypatch):
     """Resolved inside the try: a raise outside it skipped the ``finally``
     and left the global ``algo_status`` claiming "running" until a restart."""
@@ -308,6 +375,329 @@ def test_a_prelaunch_cancel_without_sigkill_raises_cancelled(monkeypatch):
 
 
 # ===========================================================================
+# Windows' group sweep: the child's Job Object
+# ===========================================================================
+
+
+@pytest.fixture
+def recorded_jobs(monkeypatch):
+    """``process_jobs`` with every Win32 call recorded instead of made."""
+    calls = {"assigned": [], "terminated": [], "closed": []}
+
+    def start(process):
+        # A weak reference: holding the process would keep its finalizer,
+        # which closes the job, from ever running.
+        calls["assigned"].append(weakref.ref(process))
+        return 7001
+
+    monkeypatch.setattr(bt.process_jobs, "start_in_kill_job", start)
+    monkeypatch.setattr(
+        bt.process_jobs, "terminate_job", lambda job: calls["terminated"].append(job) or True
+    )
+    monkeypatch.setattr(bt.process_jobs, "close_job", lambda job: calls["closed"].append(job))
+    return calls
+
+
+def test_the_sweep_ends_the_job_even_after_the_child_exited(recorded_jobs, monkeypatch):
+    """#688: the case that matters. The child obeyed CTRL_BREAK and exited in
+    the grace; a grandchild that ignored it is reachable only through the job,
+    just as POSIX reaches it through the process group after the reap."""
+    monkeypatch.setattr(bt, "_resolve_child_pgid", lambda process: None)
+    child = FakeChild()  # exits within the grace
+    bt._KILL_JOBS[child] = 7001
+
+    bt._kill_backtest_process_after_grace(child, grace_seconds=0)
+
+    assert child.killed == 0
+    assert recorded_jobs["terminated"] == [7001]
+
+
+def test_the_sweep_ends_the_job_after_a_stubborn_child_is_killed(recorded_jobs, monkeypatch):
+    monkeypatch.setattr(bt, "_resolve_child_pgid", lambda process: None)
+    stubborn = FakeChild(timeout_waits=1)
+    bt._KILL_JOBS[stubborn] = 7001
+
+    bt._kill_backtest_process_after_grace(stubborn, grace_seconds=0)
+
+    assert stubborn.killed == 1
+    assert recorded_jobs["terminated"] == [7001]
+
+
+def test_a_child_with_no_job_sweeps_nothing_new(recorded_jobs, monkeypatch):
+    """POSIX, a test stub, or a refused assignment: the old escalation alone."""
+    monkeypatch.setattr(bt, "_resolve_child_pgid", lambda process: None)
+    child = FakeChild()
+
+    bt._kill_backtest_process_after_grace(child, grace_seconds=0)
+
+    assert recorded_jobs["terminated"] == [None]
+
+
+def test_the_launch_puts_the_child_in_a_job_closed_with_the_process(recorded_jobs, monkeypatch):
+    """The handle outlives the run's return, because the cancel route's sweep
+    runs on another thread and may arrive after the worker saw the child exit.
+    It is released once the Popen object itself is gone."""
+    import gc
+
+    child = FakeChild()
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kwargs: child)
+
+    bt._run_backtest_subprocess(
+        ["python", "-c", "pass"], cwd=".", env={}, stdin_payload="", timeout=60,
+        live_run_id=None,
+    )
+
+    assert [ref() for ref in recorded_jobs["assigned"]] == [child]
+    assert bt._KILL_JOBS[child] == 7001
+    assert recorded_jobs["closed"] == []
+    monkeypatch.undo()  # drop the Popen stub's reference to the child
+    del child
+    gc.collect()
+    assert recorded_jobs["closed"] == [7001]
+
+
+def test_process_jobs_is_a_no_op_off_windows(monkeypatch):
+    from dashboard.backend.infrastructure import process_jobs
+
+    monkeypatch.setattr(process_jobs, "_IS_WINDOWS", False)
+
+    assert process_jobs.assign_kill_job(SimpleNamespace(_handle=1234)) is None
+    assert process_jobs.start_in_kill_job(SimpleNamespace(_handle=1234)) is None
+    assert process_jobs.terminate_job(7001) is False
+    process_jobs.close_job(7001)  # no raise
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the off-Windows value")
+def test_the_suspended_start_flag_is_zero_off_windows():
+    """``Popen`` refuses any non-zero creation flag off Windows."""
+    from dashboard.backend.infrastructure import process_jobs
+
+    assert process_jobs.SUSPENDED_START_FLAG == 0
+
+
+class _FakeWin32:
+    """kernel32 + ntdll stand-ins that log every call in order."""
+
+    def __init__(self, *, assign_ok=True, resume_status=0):
+        self.calls = []
+        self._assign_ok = assign_ok
+        self._resume_status = resume_status
+
+    def CreateJobObjectW(self, attrs, name):
+        self.calls.append("create")
+        return 7001
+
+    def AssignProcessToJobObject(self, job, handle):
+        self.calls.append(("assign", job, handle))
+        return self._assign_ok
+
+    def NtResumeProcess(self, handle):
+        self.calls.append(("resume", handle))
+        return self._resume_status
+
+    def CloseHandle(self, handle):
+        self.calls.append(("close", handle))
+        return True
+
+
+def _simulate_windows(monkeypatch, win32):
+    from dashboard.backend.infrastructure import process_jobs
+
+    monkeypatch.setattr(process_jobs, "_IS_WINDOWS", True)
+    monkeypatch.setattr(process_jobs, "_warned", set())
+    monkeypatch.setattr(process_jobs, "_api", lambda: win32)
+    monkeypatch.setattr(process_jobs, "_nt", lambda: win32)
+    return process_jobs
+
+
+class _SuspendedChild(FakeChild):
+    _handle = 4242
+
+    def poll(self):
+        return None
+
+
+def test_the_child_is_assigned_before_it_is_resumed(monkeypatch):
+    """#717: everything the child starts is in the job only if the child was
+    in it before it ran any code; a venv launcher starts the real interpreter
+    at once."""
+    win32 = _FakeWin32()
+    process_jobs = _simulate_windows(monkeypatch, win32)
+
+    assert process_jobs.start_in_kill_job(_SuspendedChild()) == 7001
+    assert win32.calls == ["create", ("assign", 7001, 4242), ("resume", 4242)]
+
+
+def test_a_refused_assignment_still_resumes_the_child(monkeypatch):
+    """No job costs the sweep, not the run: the child must still run."""
+    win32 = _FakeWin32(assign_ok=False)
+    process_jobs = _simulate_windows(monkeypatch, win32)
+
+    assert process_jobs.start_in_kill_job(_SuspendedChild()) is None
+    assert win32.calls[-1] == ("resume", 4242)
+
+
+def test_a_child_that_cannot_be_resumed_is_killed_not_left_hanging(monkeypatch):
+    """A suspended child nobody resumes holds its slot until the run's
+    timeout; fail the launch loudly instead."""
+    win32 = _FakeWin32(resume_status=-1073741790)  # STATUS_ACCESS_DENIED
+    process_jobs = _simulate_windows(monkeypatch, win32)
+    child = _SuspendedChild()
+
+    with pytest.raises(OSError, match="0xC0000022"):
+        process_jobs.start_in_kill_job(child)
+    assert child.killed == 1
+    assert win32.calls[-1] == ("close", 7001)
+
+
+def test_a_refused_kill_falls_back_to_the_job_and_says_so(monkeypatch):
+    """A child that can be neither resumed nor killed must not be reported as
+    killed: the job gets a try, and the message says it may still be there."""
+    win32 = _FakeWin32(resume_status=-1073741790)  # STATUS_ACCESS_DENIED
+    terminated = []
+    win32.TerminateJobObject = lambda job, code: terminated.append(job) or False
+    process_jobs = _simulate_windows(monkeypatch, win32)
+
+    class _Unkillable(_SuspendedChild):
+        pid = 31337
+
+        def kill(self):
+            raise PermissionError("access denied")
+
+    with pytest.raises(OSError, match="pid 31337 may still be suspended"):
+        process_jobs.start_in_kill_job(_Unkillable())
+    assert terminated == [7001]
+    assert win32.calls[-1] == ("close", 7001)
+
+
+def test_a_child_that_died_while_suspended_is_left_to_its_exit_code(monkeypatch):
+    """Killed from outside before the resume: nothing can hang, and the run's
+    own exit-code handling reports it more accurately than a launch error."""
+    win32 = _FakeWin32(resume_status=-1073741558)  # STATUS_PROCESS_IS_TERMINATING
+    process_jobs = _simulate_windows(monkeypatch, win32)
+
+    class _DeadChild(_SuspendedChild):
+        def poll(self):
+            return 1
+
+    child = _DeadChild()
+    assert process_jobs.start_in_kill_job(child) == 7001
+    assert child.killed == 0
+
+
+def test_the_launch_starts_the_child_suspended_and_resumes_it_first(monkeypatch):
+    """The flag and the resume ship together: a suspended child that the
+    launch does not hand to ``start_in_kill_job`` would never run."""
+    seen = {}
+    child = FakeChild()
+
+    def popen(cmd, **kwargs):
+        seen["creationflags"] = kwargs["creationflags"]
+        return child
+
+    def start(process):
+        seen["started"] = process
+        return None
+
+    monkeypatch.setattr(bt.process_jobs, "SUSPENDED_START_FLAG", 0x4)
+    monkeypatch.setattr(bt.process_jobs, "start_in_kill_job", start)
+    monkeypatch.setattr(subprocess, "Popen", popen)
+
+    bt._run_backtest_subprocess(
+        ["python", "-c", "pass"], cwd=".", env={}, stdin_payload="", timeout=60,
+        live_run_id=None,
+    )
+
+    assert seen["creationflags"] & 0x4
+    assert seen["started"] is child
+
+
+def test_a_launch_that_cannot_resume_closes_the_pipes_and_raises(monkeypatch):
+    child = FakeChild()
+
+    def start(process):
+        raise OSError("could not resume the backtest child (NTSTATUS); it was killed")
+
+    monkeypatch.setattr(bt.process_jobs, "start_in_kill_job", start)
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kwargs: child)
+
+    with pytest.raises(OSError, match="could not resume"):
+        bt._run_backtest_subprocess(
+            ["python", "-c", "pass"], cwd=".", env={}, stdin_payload="", timeout=60,
+            live_run_id=None,
+        )
+    assert child.stdout.closed and child.stderr.closed
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Job Objects need Windows")
+def test_a_real_job_kills_a_grandchild_after_its_parent_exited():
+    """End to end on Windows: the child starts a grandchild at once and exits,
+    as one that obeyed CTRL_BREAK would; the real sweep must still end the
+    grandchild.
+
+    The child spawns with no delay and the parent pauses before the
+    assignment, so a child that ran before joining the job (#717) would have
+    started the grandchild outside it, or exited and been refused. Run from a
+    Windows venv, ``sys.executable`` is the ``Scripts\\python.exe`` launcher
+    the issue is about. Verified to fail with the suspended start removed."""
+    import ctypes.wintypes
+    import time
+
+    wintypes = ctypes.wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+
+    def alive(pid):
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        code = wintypes.DWORD()
+        kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        kernel32.CloseHandle(handle)
+        return code.value == 259  # STILL_ACTIVE
+
+    child_code = (
+        "import subprocess, sys; "
+        "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+        "print(g.pid, flush=True)"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", child_code], stdout=subprocess.PIPE, text=True,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+        | bt.process_jobs.SUSPENDED_START_FLAG,
+    )
+    grandchild = None
+    job = None
+    try:
+        time.sleep(1.0)  # a slow parent: an unsuspended child is done by now
+        job = bt.process_jobs.start_in_kill_job(child)
+        assert job is not None
+        bt._KILL_JOBS[child] = job
+        grandchild = int(child.stdout.readline())
+        child.wait(timeout=30)
+        assert alive(grandchild)
+
+        bt._kill_backtest_process_after_grace(child, grace_seconds=0.5)
+
+        deadline = time.monotonic() + 5
+        while alive(grandchild) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not alive(grandchild)
+    finally:
+        if grandchild is not None and alive(grandchild):
+            handle = kernel32.OpenProcess(0x0001, False, grandchild)  # TERMINATE
+            kernel32.TerminateProcess(handle, 1)
+            kernel32.CloseHandle(handle)
+        bt._KILL_JOBS.pop(child, None)
+        bt.process_jobs.close_job(job)
+        child.stdout.close()
+
+
+# ===========================================================================
 # Windows' graceful stop: a console-group break before TerminateProcess
 # ===========================================================================
 
@@ -386,6 +776,9 @@ def test_the_child_leads_a_console_group_only_where_one_exists(monkeypatch, flag
         monkeypatch.delattr(subprocess, "CREATE_NEW_PROCESS_GROUP", raising=False)
     else:
         monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", flag, raising=False)
+    # Only the console-group bit is under test; on Windows the suspended-start
+    # bit is OR'd in too (covered by the launch test above).
+    monkeypatch.setattr(bt.process_jobs, "SUSPENDED_START_FLAG", 0)
     seen = {}
     child = FakeChild()
 
