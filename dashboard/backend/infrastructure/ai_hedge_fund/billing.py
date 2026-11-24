@@ -90,25 +90,51 @@ def parse_usage(value: Any) -> Optional[DecisionUsage]:
 
 
 class HostedDecisionBilling:
-    """Reserve, settle and release one run's per-decision Credit holds."""
+    """Reserve, settle and release one run's per-decision Credit holds.
+
+    Shared by both hosted runtimes (AI Hedge Fund here, TradingAgents in
+    ``infrastructure/tradingagents/billing.py``): the unit is one bridge
+    subprocess either way. ``provider_id`` names the lane the hold is recorded
+    against and ``source`` labels the settlement evidence and log lines, so a
+    ledger row says which runtime spent it.
+    """
 
     billing_mode = "platform_credits"
-    provider_id = PROVIDER_ID
 
-    def __init__(self, *, credits: Any, user_id: int, run_id: str, model_id: str):
+    def __init__(
+        self,
+        *,
+        credits: Any,
+        user_id: int,
+        run_id: str,
+        model_id: str,
+        provider_id: str = PROVIDER_ID,
+        source: str = "ai_hedge_fund",
+    ):
         self.credits = credits
         self.user_id = int(user_id)
         self.run_id = str(run_id)
         self.model_id = model_id
+        self.provider_id = provider_id
+        self.source = source
         self._next_call_index = 0
 
     @classmethod
-    def from_handoff(cls, *, credits: Any, handoff: Any) -> "HostedDecisionBilling":
+    def from_handoff(
+        cls,
+        *,
+        credits: Any,
+        handoff: Any,
+        provider_id: str = PROVIDER_ID,
+        source: str = "ai_hedge_fund",
+    ) -> "HostedDecisionBilling":
         return cls(
             credits=credits,
             user_id=handoff.user_id,
             run_id=handoff.run_id,
             model_id=handoff.model_id,
+            provider_id=provider_id,
+            source=source,
         )
 
     def reserve(self, amount_micro: int) -> str:
@@ -121,7 +147,7 @@ class HostedDecisionBilling:
             run_id=self.run_id,
             call_index=call_index,
             amount_micro=int(amount_micro),
-            provider_id=PROVIDER_ID,
+            provider_id=self.provider_id,
         )
         if reservation.status != "open":
             raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED)
@@ -160,7 +186,7 @@ class HostedDecisionBilling:
             basis = "ceiling"
             if outcome == "completed":
                 print(
-                    "ERROR: ai_hedge_fund.usage_unreported "
+                    f"ERROR: {self.source}.usage_unreported "
                     "billing at the decision ceiling",
                     flush=True,
                 )
@@ -168,7 +194,7 @@ class HostedDecisionBilling:
             uncapped = int(ceiling_micro)
             basis = "ceiling"
             print(
-                "ERROR: ai_hedge_fund.usage_unmetered "
+                f"ERROR: {self.source}.usage_unmetered "
                 f"calls={usage.calls} unmetered_calls={usage.unmetered_calls} "
                 "billing at the decision ceiling",
                 flush=True,
@@ -185,7 +211,7 @@ class HostedDecisionBilling:
         charged = min(uncapped, int(ceiling_micro))
         if uncapped > charged:
             print(
-                "WARNING: ai_hedge_fund.usage_above_ceiling "
+                f"WARNING: {self.source}.usage_above_ceiling "
                 f"uncapped_micro={uncapped} ceiling_micro={ceiling_micro}",
                 flush=True,
             )
@@ -197,9 +223,9 @@ class HostedDecisionBilling:
                 reservation_id,
                 actual_micro=charged,
                 evidence={
-                    "source": "ai_hedge_fund",
+                    "source": self.source,
                     "model_id": self.model_id,
-                    "provider_id": PROVIDER_ID,
+                    "provider_id": self.provider_id,
                     "outcome": outcome,
                     "basis": basis,
                     "input_tokens": input_tokens,

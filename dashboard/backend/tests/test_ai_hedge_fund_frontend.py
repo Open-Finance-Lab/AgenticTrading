@@ -71,16 +71,21 @@ def test_every_selectable_analyst_has_a_concise_description():
 def test_analyst_tooltips_support_pointer_and_keyboard_users():
     renderer = _slice(
         _EDITOR_JS,
-        "function renderAiHedgeFundAnalysts(agent)",
-        "function selectedAiHedgeFundAnalysts()",
+        "function renderHostedAnalysts(agent)",
+        "function selectedHostedAnalysts()",
     )
 
     assert 'value="${escapeHtml(id)}"' in renderer
     assert 'aria-labelledby="${escapeHtml(labelId)}"' in renderer
     assert 'aria-describedby="${escapeHtml(tooltipId)}"' in renderer
     assert 'role="tooltip"' in renderer
-    assert "${escapeHtml(description)}" in renderer
-    assert "${selected.has(id) ? 'checked' : ''}" in renderer
+    # `tip` is the description, plus the withdrawal reason when the analyst
+    # has one -- so the reason reaches the same tooltip the keyboard path uses.
+    assert "${escapeHtml(tip)}" in renderer
+    # A withdrawn analyst is never pre-checked, however it was saved; the
+    # refill behaviour itself is executed in
+    # test_agent_editor_hosted_behavior.py rather than pinned as text here.
+    assert "${!blocked && selected.has(id) ? 'checked' : ''}" in renderer
     assert "option.addEventListener('mouseenter'" in renderer
     assert "option.addEventListener('mouseleave'" in renderer
     assert "option.addEventListener('focusin'" in renderer
@@ -89,7 +94,7 @@ def test_analyst_tooltips_support_pointer_and_keyboard_users():
     positioner = _slice(
         _EDITOR_JS,
         "function positionAiHedgeFundTooltip(option)",
-        "function renderAiHedgeFundAnalysts(agent)",
+        "function renderHostedAnalysts(agent)",
     )
     assert "getBoundingClientRect()" in positioner
     assert "window.visualViewport" in positioner
@@ -122,7 +127,7 @@ def test_analyst_tooltips_support_pointer_and_keyboard_users():
 def test_analyst_tooltips_do_not_change_runtime_config_submission():
     selected = _slice(
         _EDITOR_JS,
-        "function selectedAiHedgeFundAnalysts()",
+        "function selectedHostedAnalysts()",
         "function setFinancialDatasetsStatus",
     )
     editor_state = _slice(
@@ -132,13 +137,17 @@ def test_analyst_tooltips_do_not_change_runtime_config_submission():
     )
 
     assert ').map((input) => input.value);' in selected
-    assert "? { analysts: selectedAiHedgeFundAnalysts() }" in editor_state
+    assert "? { analysts: selectedHostedAnalysts() }" in editor_state
 
 
 def test_hosted_editor_replaces_model_picker_with_managed_metadata():
     assert 'id="agentEditorModelField"' in _APP_HTML
     assert 'id="agentEditorManagedModelField"' in _APP_HTML
-    assert "OpenRouter · nvidia/nemotron-3-nano-30b-a3b" in _APP_HTML
+    # No model name in the markup: the line is filled from
+    # GET /api/v1/agents/hosted-runtimes, because a literal here was a claim
+    # nothing verified and it named the wrong pair in production.
+    assert 'id="agentEditorManagedModelValue"' in _APP_HTML
+    assert "nemotron" not in _APP_HTML
     assert "hosted and managed by Agentic Trading Lab" in _APP_HTML
 
     configure = _slice(
@@ -146,8 +155,8 @@ def test_hosted_editor_replaces_model_picker_with_managed_metadata():
         "function configureEditorMode(agent)",
         "function populateModelSelect(agent)",
     )
-    assert "modelField.hidden = hostedAiHedgeFund" in configure
-    assert "managedModelField.hidden = !hostedAiHedgeFund" in configure
+    assert "modelField.hidden = hostedRuntime" in configure
+    assert "managedModelField.hidden = !hostedRuntime" in configure
     assert ".agent-editor-model-field[hidden]" in _STYLES_CSS
     assert ".agent-editor-managed-model-field[hidden]" in _STYLES_CSS
 
@@ -158,7 +167,7 @@ def test_hosted_editor_never_submits_a_model_override():
         "function getEditorState()",
         "function snapshotState()",
     )
-    assert "model_name: hostedAiHedgeFund\n        ? ''" in editor_state
+    assert "model_name: hostedRuntime\n        ? ''" in editor_state
 
 
 def test_robinhood_editor_behavior_is_shared_by_both_runtimes():

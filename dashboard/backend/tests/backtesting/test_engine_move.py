@@ -11,7 +11,7 @@ import os
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -317,12 +317,15 @@ def test_ai_hedge_fund_run_persists_bounded_decision_audit(patched_engine):
     assert persisted_run_id == run_id
     assert len(rows) == runtime.calls
     assert rows[0]["decision_source"] == AI_HEDGE_FUND_RUNTIME_TYPE
-    assert rows[0]["context_ref"] == "2026-03-02"
+    # The window's first session (Mon 2026-03-02) is decided too, its cutoff
+    # the previous NYSE session from the calendar (Fri 2026-02-27): hosted
+    # runtimes load no bars before the window.
+    assert rows[0]["context_ref"] == "2026-02-27"
     assert rows[0]["actions_executed"] == 0
     assert rows[0]["actions_submitted"] == [
         {
-            "decision_date": "2026-03-03",
-            "data_cutoff_date": "2026-03-02",
+            "decision_date": "2026-03-02",
+            "data_cutoff_date": "2026-02-27",
             "ticker": "AAPL",
             "upstream_action": "hold",
             "upstream_quantity": 0,
@@ -804,10 +807,365 @@ def test_hosted_run_that_never_reached_the_model_is_not_attributed_to_it(
     # With no prior market date for any bar, every step holds before it can
     # dispatch -- the "first trading date of the run" case, generalized.
     monkeypatch.setattr(
-        engine_mod, "_prior_market_date_by_decision_date", lambda timestamps: {}
+        engine_mod,
+        "_prior_market_date_by_decision_date",
+        lambda timestamps, **_kwargs: {},
     )
     bt.run_agent_backtest()
 
     run_row = patched_engine.runs[0]
     assert run_row["llm_calls"] == 0
     assert run_row["llm_model"] == "rule-based"
+
+
+# ---------------------------------------------------------------------------
+# TradingAgents hosted runtime
+# ---------------------------------------------------------------------------
+
+
+def _tradingagents_bridge_output(rating="Buy", action="BUY"):
+    return {
+        "schema_version": "tradingagents-atl-v1",
+        "manifest": {"symbol": "AAPL", "tradingagents_version": "0.3.1"},
+        "decision": {
+            "analysis_date": "2026-03-02",
+            "rating": rating,
+            "atl_action": action,
+            "status": "valid",
+            "attempts": 1,
+            "raw_sha256": "b" * 64,
+            "raw_excerpt": "FINAL TRANSACTION PROPOSAL",
+        },
+    }
+
+
+class _TradingAgentsBuyRunner:
+    def __init__(self):
+        self.payloads = []
+
+    def run(self, payload, *, timeout_seconds):
+        self.payloads.append(payload)
+        return _tradingagents_bridge_output()
+
+
+def test_engine_builds_the_tradingagents_runtime_from_the_runtime_type(patched_engine):
+    """Hosted runtimes are constructed by the engine, not the dispatcher. A
+    runtime_type the engine does not know would otherwise reach the dispatch
+    boundary with no runtime at all."""
+    from dashboard.backend.domain.agents.runtime import TRADINGAGENTS_RUNTIME_TYPE
+    from dashboard.backend.infrastructure.tradingagents.adapter import (
+        TradingAgentsRuntime,
+    )
+
+    bt = HourlyBacktester(
+        "2026-03-01",
+        "2026-04-01",
+        "ta-wiring",
+        runtime_type=TRADINGAGENTS_RUNTIME_TYPE,
+        runtime_config={"analysts": ["market"]},
+        symbols=["AAPL"],
+        decision_source="llm",
+    )
+
+    assert isinstance(bt.runtime_dispatcher._runtime, TradingAgentsRuntime)
+
+
+def test_tradingagents_run_turns_a_rating_into_orders_and_audit_rows(patched_engine):
+    """The whole hosted path in one pass: engine -> runtime -> bridge payload
+    -> rating -> sized order -> executed trade -> persisted decision rows."""
+    from dashboard.backend.domain.agents.runtime import (
+        TRADINGAGENTS_RUNTIME_TYPE,
+        RuntimeDispatcher,
+    )
+    from dashboard.backend.infrastructure.tradingagents.adapter import (
+        TradingAgentsRuntime,
+    )
+
+    runner = _TradingAgentsBuyRunner()
+    runtime = TradingAgentsRuntime(
+        {"analysts": ["market"]}, runner=runner, environment={}
+    )
+    bt = HourlyBacktester(
+        "2026-03-01",
+        "2026-04-01",
+        "ta-hosted",
+        runtime_type=TRADINGAGENTS_RUNTIME_TYPE,
+        runtime_config={"analysts": ["market"]},
+        symbols=["AAPL"],
+        decision_source="llm",
+    )
+    bt.runtime_dispatcher = RuntimeDispatcher(
+        TRADINGAGENTS_RUNTIME_TYPE, {"analysts": ["market"]}, runtime=runtime
+    )
+    bt.load_data()
+    bt.calculate_indicators()
+
+    run_id, _curve = bt.run_agent_backtest()
+
+    # Upstream was asked for one date per trading day, never the decision day.
+    assert runner.payloads
+    for payload in runner.payloads:
+        assert len(payload["analysis_dates"]) == 1
+        assert payload["symbol"] == "AAPL"
+
+    persisted_run_id, trades = patched_engine.trades[0]
+    assert persisted_run_id == run_id
+    assert [t for t in trades if t.get("side") == "BUY"]
+
+    decisions_run_id, rows = patched_engine.decisions[0]
+    assert decisions_run_id == run_id
+    assert len(rows) == runtime.calls
+    assert rows[0]["decision_source"] == TRADINGAGENTS_RUNTIME_TYPE
+
+    # The billing counter the H6 guard and the credit refund path both read.
+    assert patched_engine.runs[0]["llm_calls"] == runtime.calls
+
+
+def test_tradingagents_steps_receive_a_cutoff_date_before_the_decision_day(
+    patched_engine,
+):
+    """Without a prior-market-date map the cutoff is None on every bar, and the
+    runtime holds for the entire run while looking perfectly healthy."""
+    from dashboard.backend.domain.agents.runtime import (
+        TRADINGAGENTS_RUNTIME_TYPE,
+        RuntimeDispatcher,
+    )
+    from dashboard.backend.infrastructure.tradingagents.adapter import (
+        TradingAgentsRuntime,
+    )
+
+    runner = _TradingAgentsBuyRunner()
+    bt = HourlyBacktester(
+        "2026-03-01",
+        "2026-04-01",
+        "ta-cutoff",
+        runtime_type=TRADINGAGENTS_RUNTIME_TYPE,
+        runtime_config={"analysts": ["market"]},
+        symbols=["AAPL"],
+        decision_source="llm",
+    )
+    runtime = TradingAgentsRuntime(
+        {"analysts": ["market"]}, runner=runner, environment={}
+    )
+    bt.runtime_dispatcher = RuntimeDispatcher(
+        TRADINGAGENTS_RUNTIME_TYPE, {"analysts": ["market"]}, runtime=runtime
+    )
+    bt.load_data()
+    bt.calculate_indicators()
+
+    bt.run_agent_backtest()
+
+    rows = patched_engine.decisions[0][1]
+    for row in rows:
+        cutoff = row["actions_submitted"][0]["data_cutoff_date"]
+        assert cutoff and cutoff < row["actions_submitted"][0]["decision_date"]
+
+
+def _tradingagents_backtester(runner, session_id, *, symbols=("AAPL",)):
+    from dashboard.backend.domain.agents.runtime import (
+        TRADINGAGENTS_RUNTIME_TYPE,
+        RuntimeDispatcher,
+    )
+    from dashboard.backend.infrastructure.tradingagents.adapter import (
+        TradingAgentsRuntime,
+    )
+
+    bt = HourlyBacktester(
+        "2026-03-01",
+        "2026-04-01",
+        session_id,
+        runtime_type=TRADINGAGENTS_RUNTIME_TYPE,
+        runtime_config={"analysts": ["market"]},
+        symbols=list(symbols),
+        decision_source="llm",
+    )
+    bt.runtime_dispatcher = RuntimeDispatcher(
+        TRADINGAGENTS_RUNTIME_TYPE,
+        {"analysts": ["market"]},
+        runtime=TradingAgentsRuntime(
+            {"analysts": ["market"]}, runner=runner, environment={}
+        ),
+    )
+    bt.load_data()
+    bt.calculate_indicators()
+    return bt
+
+
+def test_tradingagents_transient_failure_is_held_not_fatal(patched_engine):
+    """A rate limit on day 3 of 21 must cost that day, not the run.
+
+    This is really a test of the exception hierarchy: the engine catches
+    ``AgentRuntimeError``, so a TradingAgents failure that did not inherit from
+    it would escape run_agent_backtest and discard every completed step.
+    """
+    from dashboard.backend.infrastructure.tradingagents.adapter import (
+        TradingAgentsRuntimeError,
+    )
+
+    class FlakyRunner:
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, payload, *, timeout_seconds):
+            self.calls += 1
+            if self.calls == 1:
+                raise TradingAgentsRuntimeError("upstream rate limited")
+            return _tradingagents_bridge_output()
+
+    runner = FlakyRunner()
+    bt = _tradingagents_backtester(runner, "ta-flaky")
+
+    run_id, _curve = bt.run_agent_backtest()
+
+    assert run_id
+    assert len(bt.runtime_step_failures) == 1
+    assert runner.calls > 1  # the run kept going after the bad day
+
+
+def test_tradingagents_configuration_failure_aborts_immediately(patched_engine):
+    """A missing interpreter fails identically on every step. Holding once per
+    trading day would turn one clear error into a long silent all-holds run."""
+    from dashboard.backend.infrastructure.tradingagents.adapter import (
+        TradingAgentsConfigurationError,
+    )
+
+    class BrokenRunner:
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, payload, *, timeout_seconds):
+            self.calls += 1
+            raise TradingAgentsConfigurationError("runtime is not installed")
+
+    runner = BrokenRunner()
+    bt = _tradingagents_backtester(runner, "ta-misconfigured")
+
+    with pytest.raises(TradingAgentsConfigurationError):
+        bt.run_agent_backtest()
+
+    assert runner.calls == 1
+    assert bt.runtime_step_failures == []
+
+def test_a_run_that_could_not_afford_a_share_says_so_in_its_row(patched_engine):
+    """A flat curve must not be indistinguishable from a model that held.
+
+    At the product's own bounds the position budget is equity x 0.2 -- $200 on
+    the default $1,000 sleeve -- so every Buy on a $255 stock sizes to zero
+    shares. The run completes, the curve is flat, and before this nothing on
+    any ATL surface said the capital rather than the model produced it.
+    """
+    bt = _tradingagents_backtester(_TradingAgentsBuyRunner(), "ta-unaffordable")
+    # Re-price the loaded tape above the position budget. This is the real
+    # shape of a default sleeve against a mega-cap, not an invented edge case.
+    for frame in bt.all_data.values():
+        for column in ("open", "high", "low", "close"):
+            if column in frame:
+                frame[column] = frame[column] * 50.0
+    bt.run_agent_backtest()
+
+    run = patched_engine.runs[0]
+    meta = run["metadata"]
+    filters = meta["runtime_sizing_filters"]
+    # Every decision was a Buy that could not be sized.
+    assert filters.get("price_above_position_budget", 0) > 0
+    assert filters["price_above_position_budget"] == meta["runtime_decisions"]
+    # The model drove every step, so this is emphatically not a coverage
+    # failure -- which is exactly why the reason has to be recorded.
+    assert meta["runtime_decisions"] == run["llm_decisions"] > 0
+
+
+def test_a_billed_call_that_decided_nothing_is_not_counted_as_coverage(
+    patched_engine,
+):
+    """`llm_calls` is the invoice; `llm_decisions` is the work.
+
+    The runtime bills the call the moment upstream returns and validates the
+    output afterwards, so a response that fails validation is paid for and
+    decides nothing. Counting it in both halves of the coverage ratio reported
+    a single failed step as 1/2 = 50% covered.
+    """
+
+    class OneBadDayRunner:
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, payload, *, timeout_seconds):
+            self.calls += 1
+            output = _tradingagents_bridge_output()
+            if self.calls == 2:
+                # Outside the five-tier map: billed, unusable.
+                output["decision"]["rating"] = "Strong Buy"
+            return output
+
+    bt = _tradingagents_backtester(OneBadDayRunner(), "ta-billed-nondecision")
+    bt.run_agent_backtest()
+
+    run = patched_engine.runs[0]
+    meta = run["metadata"]
+    billed = run["llm_calls"]
+    decided = meta["runtime_decisions"]
+    failed = meta["runtime_step_failures"]
+    assert failed == 1
+    assert decided == billed - 1, "the failed call is billed but decided nothing"
+    # Each step asked is counted once, in exactly one of the two buckets.
+    assert meta["decision_steps"] == decided + failed
+    assert run["llm_decisions"] == decided
+
+
+def test_the_windows_first_session_is_decided_on_the_previous_nyse_session(
+    patched_engine,
+):
+    """A one-day window consists of exactly this step.
+
+    Hosted runtimes load no bars before the window, so the first session has
+    no earlier bar. It used to be skipped: a one-day window ran to "success"
+    having asked the model nothing, and every N-day window made N-1
+    decisions. Its cutoff now comes from the exchange calendar.
+    """
+    bt = _tradingagents_backtester(_TradingAgentsBuyRunner(), "ta-first-day")
+    bt.run_agent_backtest()
+
+    run = patched_engine.runs[0]
+    meta = run["metadata"]
+    assert meta.get("runtime_skipped_steps", 0) == 0
+    _persisted_run_id, rows = patched_engine.decisions[0]
+    assert rows[0]["timestamp"].startswith("2026-03-02")
+    assert rows[0]["context_ref"] == "2026-02-27"
+
+
+def test_a_step_with_no_prior_market_date_is_recorded_rather_than_held_silently(
+    patched_engine, monkeypatch
+):
+    """Off the US calendar the first session still has no cutoff, and the
+    runtime holds rather than inventing one -- recorded, so the run says so."""
+    bt = _tradingagents_backtester(_TradingAgentsBuyRunner(), "ta-first-day-cn")
+    real = engine_mod._prior_market_date_by_decision_date
+    monkeypatch.setattr(
+        engine_mod,
+        "_prior_market_date_by_decision_date",
+        lambda timestamps, **_kwargs: real(timestamps, market="CN"),
+    )
+    bt.run_agent_backtest()
+
+    meta = patched_engine.runs[0]["metadata"]
+    assert meta["runtime_skipped_steps"] >= 1
+    assert meta["runtime_skipped_step_samples"][0]["reason"] == (
+        "no_market_date_before_decision"
+    )
+
+
+def test_the_first_sessions_cutoff_skips_holidays_and_weekends():
+    from datetime import datetime as _dt
+
+    stamps = [_dt(2026, 1, 20, 15), _dt(2026, 1, 21, 15)]
+    # Tue 2026-01-20 follows the MLK holiday and a weekend.
+    us = engine_mod._prior_market_date_by_decision_date(stamps, market="US")
+    assert us[date(2026, 1, 20)] == date(2026, 1, 16)
+    assert us[date(2026, 1, 21)] == date(2026, 1, 20)
+    # No exchange calendar elsewhere: left undecided rather than guessed.
+    assert engine_mod._prior_market_date_by_decision_date(stamps)[
+        date(2026, 1, 20)
+    ] is None
+    # Hurricane Sandy (Mon-Tue) beside a weekend: four non-sessions.
+    assert engine_mod._previous_nyse_session(date(2012, 10, 31)) == date(2012, 10, 26)
+

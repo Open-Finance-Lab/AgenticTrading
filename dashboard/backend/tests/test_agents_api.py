@@ -1504,3 +1504,105 @@ def test_claimed_agents_are_billed_to_the_account_not_the_browser(tmp_path):
     ]
     # The guest's scope is its browser, and excludes the claimed sibling.
     assert store.list_owner_scope_agent_ids(guest["agent_id"]) == [guest["agent_id"]]
+
+
+def _sign_in(monkeypatch, user_id=7):
+    monkeypatch.setattr(
+        "dashboard.backend.api.dependencies._optional_user",
+        lambda *_args, **_kwargs: {"id": user_id},
+    )
+
+
+def test_hosted_runtimes_requires_an_account(client, monkeypatch):
+    """The answer says whether COMMONSTACK_API_KEY is configured.
+
+    `_GATEWAY_AUTODETECT_ORDER` returns commonstack iff that key is present,
+    so an anonymous answer discloses deployment state -- the same fact
+    `_validate_tradingagents_runtime`'s 503 is ordered behind the sign-in gate
+    to withhold. A signed-out visitor cannot run a hosted backtest either, so
+    there is nothing they need this for.
+    """
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "platform-commonstack-test-key")
+
+    response = client.get("/api/v1/agents/hosted-runtimes")
+
+    assert response.status_code == 401, response.text
+
+
+def test_hosted_runtimes_report_the_gateway_the_deployment_actually_uses(
+    client, monkeypatch
+):
+    """The agent editor's managed-model line is read from here.
+
+    It used to be a literal in app.html that nothing wrote, so every hosted
+    agent's Configure panel claimed OpenRouter and nemotron. Production
+    resolves CommonStack first, so for TradingAgents both halves were wrong.
+    """
+    monkeypatch.delenv("TRADINGAGENTS_GATEWAY", raising=False)
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "platform-commonstack-test-key")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    _sign_in(monkeypatch)
+
+    response = client.get("/api/v1/agents/hosted-runtimes")
+
+    assert response.status_code == 200, response.text
+    runtimes = response.json()["runtimes"]
+    assert runtimes["tradingagents"]["provider"] == "commonstack"
+    assert runtimes["tradingagents"]["provider_label"] == "CommonStack"
+    assert runtimes["tradingagents"]["model"] == "anthropic/claude-haiku-4-5"
+    # AI Hedge Fund has no gateway selection of its own and must not inherit
+    # TradingAgents'.
+    assert runtimes["ai_hedge_fund"]["provider"] == "openrouter"
+    assert runtimes["ai_hedge_fund"]["model"] == "nvidia/nemotron-3-nano-30b-a3b"
+
+
+def test_hosted_runtimes_follow_the_gateway_override(client, monkeypatch):
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "platform-commonstack-test-key")
+    monkeypatch.setenv("TRADINGAGENTS_GATEWAY", "openrouter")
+    _sign_in(monkeypatch)
+
+    runtimes = client.get("/api/v1/agents/hosted-runtimes").json()["runtimes"]
+
+    assert runtimes["tradingagents"]["provider"] == "openrouter"
+    assert runtimes["tradingagents"]["model"] == "nvidia/nemotron-3-nano-30b-a3b"
+
+
+def test_hosted_runtimes_answer_differs_with_the_configured_gateway(
+    client, monkeypatch
+):
+    """And that is exactly why it needs an account.
+
+    This test previously asserted the opposite -- that a configured and an
+    unconfigured deployment answer identically -- on the strength of the
+    resolver's default fallback. It does not hold for CommonStack, which is
+    what production uses, so the honest conclusion was to gate the route
+    rather than to keep claiming the property.
+    """
+    monkeypatch.delenv("TRADINGAGENTS_GATEWAY", raising=False)
+    _sign_in(monkeypatch)
+
+    # CommonStack is the case that discloses, and the one production uses:
+    # `_GATEWAY_AUTODETECT_ORDER` returns it iff its key is present.
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "platform-commonstack-test-key")
+    with_commonstack = client.get("/api/v1/agents/hosted-runtimes").json()
+
+    monkeypatch.delenv("COMMONSTACK_API_KEY", raising=False)
+    without = client.get("/api/v1/agents/hosted-runtimes").json()
+
+    assert with_commonstack != without
+    assert with_commonstack["runtimes"]["tradingagents"]["provider"] == "commonstack"
+    # Without it the resolver falls back to its default, which is why the
+    # original claim looked true when tested on OpenRouter alone.
+    assert without["runtimes"]["tradingagents"]["provider"] == "openrouter"
+
+
+def test_a_bad_gateway_override_does_not_break_the_panel(client, monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_GATEWAY", "not-a-gateway")
+    _sign_in(monkeypatch)
+
+    response = client.get("/api/v1/agents/hosted-runtimes")
+
+    # Presentational endpoint: the run itself is refused elsewhere with the
+    # real message, so this reports the default rather than failing the panel.
+    assert response.status_code == 200
+    assert response.json()["runtimes"]["tradingagents"]["provider"] == "openrouter"

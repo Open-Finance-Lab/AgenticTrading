@@ -1,0 +1,20 @@
+# Installed only into the dedicated TradingAgents virtual environment.
+# Pin the reviewed upstream source; never install these dependencies into ATL's
+# main environment because upstream's LangChain/LangGraph constraints are
+# independent of the dashboard's.
+#
+# Install with Python 3.11 or 3.12. Upstream declares >=3.10, and 3.11 is what
+# this integration was verified against.
+#
+#   python -m venv .tradingagents-venv
+#   .tradingagents-venv/bin/pip install -r requirements-tradingagents.txt
+#
+# The bridge also needs ATL's own SDK (agentictrading), which supplies
+# TradingAgentsDecisionGenerator. It is NOT installed here: the adapter puts
+# packaging/agentictrading/src on the child's PYTHONPATH, so the repository's
+# source tree stays the single copy.
+#
+# Pinned to the exact revision the hosted runtime was verified against
+# (v0.3.1 + 6 commits; importlib.metadata reports 0.3.1, which is what
+# _validate_tradingagents_version accepts).
+tradingagents @ https://github.com/TauricResearch/TradingAgents/archive/a33fd4c0f134485a43553a2c23a63cb14adbd88f.tar.gz

@@ -17,7 +17,7 @@ be extracted in a later phase.
 import inspect
 import json
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from math import ceil
 # `from time import ...`, not `import time`. This module used to import
 # `datetime.time` too, to build the A-share session bounds inline, and the two
@@ -102,6 +102,7 @@ from dashboard.backend.domain.agents.runtime import (
     AI_HEDGE_FUND_RUNTIME_TYPE,
     DEFAULT_RUNTIME_TYPE,
     PIPELINE_RUNTIME_TYPE,
+    TRADINGAGENTS_RUNTIME_TYPE,
     AgentRuntimeConfigurationError,
     AgentRuntimeContext,
     AgentRuntimeError,
@@ -110,6 +111,9 @@ from dashboard.backend.domain.agents.runtime import (
     normalize_runtime_type,
 )
 from dashboard.backend.infrastructure.ai_hedge_fund.adapter import AiHedgeFundRuntime
+from dashboard.backend.infrastructure.tradingagents.adapter import (
+    TradingAgentsRuntime,
+)
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     MarketDataUnavailableError,
     feed_provenance,
@@ -152,6 +156,9 @@ from dashboard.backend.infrastructure.market_data.sessions import (
     frames_open_stamped_minutes,
     is_in_session,
 )
+from dashboard.backend.infrastructure.market_data.us_market_calendar import (
+    is_trading_day as is_nyse_trading_day,
+)
 from dashboard.backend.infrastructure.market_data.profiles import (
     IFIND_ASHARE,
     LLM_DECISION_SOURCE,
@@ -174,6 +181,16 @@ from dashboard.backend.infrastructure.llm.pipeline_runner import (
     split_pipeline,
     trading_day_key,
 )
+
+# Hosted runtimes are constructed here, the single production caller, rather
+# than inside RuntimeDispatcher: domain/agents/runtime.py must not import an
+# infrastructure adapter. A runtime registered in SUPPORTED_RUNTIME_TYPES but
+# missing here raises KeyError at construction, which is the loud failure --
+# the quiet one would be a dispatcher with no runtime behind it.
+HOSTED_RUNTIME_FACTORIES = {
+    AI_HEDGE_FUND_RUNTIME_TYPE: AiHedgeFundRuntime,
+    TRADINGAGENTS_RUNTIME_TYPE: TradingAgentsRuntime,
+}
 
 # Hosted-runtime failure tolerance. A hosted decision crosses a subprocess
 # boundary and a third-party API, so one timeout must not discard a run's worth
@@ -238,15 +255,43 @@ def _unfilled_order_events(order_events) -> List[Dict]:
     ]
 
 
+# How far back the first decision day's cutoff is looked for. NYSE's longest
+# run of non-sessions since 2004 is four days (a holiday weekend, and the
+# 2012 Hurricane Sandy closure beside one), so two weeks is never the limit.
+_PRIOR_SESSION_SEARCH_DAYS = 14
+
+
+def _previous_nyse_session(day: date) -> Optional[date]:
+    """The latest NYSE trading day strictly before ``day``, by the calendar."""
+    for offset in range(1, _PRIOR_SESSION_SEARCH_DAYS + 1):
+        candidate = day - timedelta(days=offset)
+        if is_nyse_trading_day(candidate):
+            return candidate
+    return None
+
+
 def _prior_market_date_by_decision_date(
-    timestamps,
+    timestamps, *, market: Optional[str] = None
 ) -> Dict[date, Optional[date]]:
-    """Map each ATL trading date to its latest strictly earlier trading date."""
+    """Map each ATL trading date to its latest strictly earlier trading date.
+
+    Inside the window that is the loaded bars' previous date. The window's
+    first date has no earlier bar -- hosted runtimes fetch no indicator pad --
+    so on the US market it falls back to the previous NYSE session from the
+    exchange calendar (holidays and unscheduled closures included), never to a
+    calendar subtraction. Without the fallback the first day could not be
+    decided at all: a one-day window ran to "success" having asked the model
+    nothing, and every N-day window made N-1 decisions. Elsewhere there is no
+    exchange calendar in the codebase, so the first day stays undecided.
+    """
     market_dates = sorted({timestamp.date() for timestamp in timestamps})
-    return {
+    mapping: Dict[date, Optional[date]] = {
         decision_date: market_dates[index - 1] if index else None
         for index, decision_date in enumerate(market_dates)
     }
+    if market_dates and str(market or "").upper() == "US":
+        mapping[market_dates[0]] = _previous_nyse_session(market_dates[0])
+    return mapping
 
 
 def _accepts_keyword(function, name: str, *, via_var_keyword: bool = True) -> bool:
@@ -344,21 +389,17 @@ class HourlyBacktester:
         self.runtime_config = normalize_runtime_config(
             self.runtime_type, runtime_config or {}
         )
-        # The concrete runtime is constructed here, the single production caller,
-        # rather than inside RuntimeDispatcher: domain/agents/runtime.py must not
-        # import an infrastructure adapter, and this file already depends on
-        # infrastructure for market data and LLM access.
         self.runtime_dispatcher = (
             RuntimeDispatcher(
                 self.runtime_type,
                 self.runtime_config,
                 # The hosted runtime's Credits metering, built by the child
                 # from the signed handoff; None off the API path.
-                runtime=AiHedgeFundRuntime(
+                runtime=HOSTED_RUNTIME_FACTORIES[self.runtime_type](
                     self.runtime_config, billing=hosted_billing
                 ),
             )
-            if self.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE
+            if self.runtime_type != PIPELINE_RUNTIME_TYPE
             else None
         )
         # Transient hosted-runtime failures absorbed by this run, kept for the
@@ -1920,10 +1961,31 @@ class HourlyBacktester:
             # Absorbing failures as holds keeps a run alive, but a run that
             # held its way through half the period must not read as a clean
             # one. Record the count (and a bounded sample) on the run itself.
+            # Billed calls and driven decisions are different numbers: an
+            # upstream response that fails validation is paid for and decides
+            # nothing. Recorded separately so a run cannot read as fully
+            # model-driven on the strength of its invoice.
+            meta["runtime_decisions"] = self.runtime_dispatcher.decisions
             if self.runtime_step_failures:
                 meta["runtime_step_failures"] = len(self.runtime_step_failures)
                 meta["runtime_step_failure_samples"] = [
                     text[:300] for text in self.runtime_step_failures[:5]
+                ]
+            # Why decisions produced no orders. Without this a window of zero
+            # trades is indistinguishable from a model that held throughout,
+            # and the likeliest cause is the position budget rather than the
+            # model -- see TradingAgentsRuntime.sizing_filter_counts.
+            sizing_filters = self.runtime_dispatcher.sizing_filter_counts
+            if sizing_filters:
+                meta["runtime_sizing_filters"] = sizing_filters
+            # Steps that produced no decision at all. A one-day window is
+            # exactly one such step, and used to complete as a clean run that
+            # had never asked the model anything.
+            skipped = self.runtime_dispatcher.skipped_steps
+            if skipped:
+                meta["runtime_skipped_steps"] = len(skipped)
+                meta["runtime_skipped_step_samples"] = [
+                    dict(entry) for entry in skipped[:5]
                 ]
         return meta
 
@@ -2177,9 +2239,14 @@ class HourlyBacktester:
         all_timestamps = filtered
         
         all_timestamps = self._market_hours_only(all_timestamps, self.all_data)
+        # Every hosted runtime needs this map: it is the only source of a data
+        # cutoff strictly before the decision day, and an empty one makes the
+        # runtime hold every step while the run still looks healthy.
         prior_market_dates = (
-            _prior_market_date_by_decision_date(all_timestamps)
-            if self.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE
+            _prior_market_date_by_decision_date(
+                all_timestamps, market=getattr(self.profile, "market", None)
+            )
+            if self.runtime_type != PIPELINE_RUNTIME_TYPE
             else {}
         )
         # Hosted runtimes decide once per trading day, so the budget is a share
@@ -2547,15 +2614,34 @@ class HourlyBacktester:
         else:
             # A hosted runtime decides once per trading day and holds on every
             # other bar, so the hourly bar count is not its denominator: it
-            # would report a genuine run as ~1/7 covered. `runtime_calls` is
-            # every step it drove, and each entry in `runtime_step_failures` is
-            # a step it was asked for and could not answer -- their sum is the
-            # steps the model was actually asked to decide. There is no
-            # billed-but-unusable case on this path (the bridge reports no
-            # usage at all), which is why numerator and billing counter
-            # coincide here and must not be collapsed anywhere else.
-            llm_decisions_total = runtime_calls
-            decision_steps_total = runtime_calls + len(self.runtime_step_failures)
+            # would report a genuine run as ~1/7 covered. Each entry in
+            # `runtime_step_failures` is a step the model was asked for and
+            # could not answer, so driven + failed is the steps it was asked
+            # to decide.
+            #
+            # The numerator is `decisions`, NOT `runtime_calls`. This comment
+            # used to assert there was no billed-but-unusable case on this
+            # path, so the two could coincide -- that was wrong. The runtime
+            # bills the call the moment upstream returns and validates the
+            # output afterwards, so a response that fails validation is paid
+            # for and decides nothing. Counting it in both halves reported a
+            # single failed step as 1/2 = 50% covered, when the honest figure
+            # is 0/1.
+            #
+            # ⚠ This holds for a runtime that *reports* `decisions`. The
+            # dispatcher falls back to `calls` for one that does not, and
+            # `AiHedgeFundRuntime` does not -- so AI Hedge Fund still counts a
+            # billed-but-unusable step in both halves. Its `decide` has the
+            # same shape (increment, then map, where the mapping can raise
+            # `AiHedgeFundOutputError`), so the gap is real rather than
+            # theoretical; closing it changes a number the leaderboard
+            # integrity guard reads, which is a product decision and is
+            # recorded for the team rather than taken here. Pinned by
+            # `test_the_decisions_fallback_is_a_known_gap`.
+            llm_decisions_total = self.runtime_dispatcher.decisions
+            decision_steps_total = llm_decisions_total + len(
+                self.runtime_step_failures
+            )
         # Read back out of `self` by _agent_run_metadata below, the same way it
         # already reads decision_source and the execution evidence. Not named
         # `decision_steps`: that spelling is already taken in this module for
@@ -2626,7 +2712,7 @@ class HourlyBacktester:
 
         db.insert_equity_points(run_id, equity_curve)
         db.insert_trades(run_id, self._serialize_trades(manager.trades))
-        if self.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
+        if self.runtime_type != PIPELINE_RUNTIME_TYPE:
             db.insert_decisions(run_id, self.runtime_dispatcher.decision_audit_rows)
         
         print(f"\n  ✅ Agent backtest complete")

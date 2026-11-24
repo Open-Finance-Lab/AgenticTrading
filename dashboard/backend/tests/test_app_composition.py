@@ -197,6 +197,9 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/api/v1/agents"),
     ("POST", "/api/v1/agents"),
     ("GET", "/api/v1/agents/builtin"),
+    # Additive and presentational: publishes the provider/model each hosted
+    # runtime resolves, so the agent editor stops hard-coding that line.
+    ("GET", "/api/v1/agents/hosted-runtimes"),
     ("GET", "/api/v1/agents/marketplace"),
     ("POST", "/api/v1/agents/marketplace/{template_id}/clone"),
     ("POST", "/api/v1/agents/claim-account"),
