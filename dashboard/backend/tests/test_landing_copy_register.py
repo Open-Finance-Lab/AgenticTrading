@@ -219,7 +219,7 @@ def test_race_sample_cards_have_no_live_pulse():
     The card draws the live board now, which removes the contradiction but not
     the ban: a green pulse beside a FIXED historical window would be a fresh
     claim of its own, and a worse one for being on real numbers. The surrounding
-    prose may still say "live" — the Live Trading Leaderboard is a real board
+    prose may still say "live" — the Live Leaderboard is a real board
     with a real name, and live *market prices* are a real product property.
 
     The positive assertions pin that the cards themselves still ship AND that the
@@ -265,7 +265,8 @@ def test_race_names_the_two_boards_the_app_actually_serves():
     different contracts, and conflating them is what let the old copy promise a
     live race over a fixed historical window. Both names ship."""
     text = _shipped_text()
-    assert "Live Trading Leaderboard" in text
+    assert "Live Leaderboard" in text
+    assert "Live Trading Leaderboard" not in text, "the landing still ships the retired name"
     assert "Competition" in text
 
 
@@ -307,7 +308,7 @@ _CLAIM_DISCLAIMERS = (
 )
 
 # Claim shapes, not vocabulary. "live trading" is deliberately absent: it is now
-# a board name ("Live Trading Leaderboard"), so banning the bare phrase would
+# a board name ("Live Leaderboard", formerly "Live Trading Leaderboard"), so banning the bare phrase would
 # make naming the product a test failure — the mirror image of the scoping bug
 # above, and the reason the sibling guard in test_landing_value_band.py was
 # changed to match the claim instead.
@@ -628,8 +629,9 @@ def test_race_source_and_shipped_bundle_agree():
     into ../frontend/ would leave them green against stale text. Anchoring one
     string on both sides makes the missing `npm run build` the failure."""
     source = _RACE_TSX.read_text(encoding="utf-8")
-    assert "Live Trading Leaderboard" in source, "Race.tsx no longer names the board"
-    assert "Live Trading Leaderboard" in _shipped_text(), (
+    assert "Live Leaderboard" in source, "Race.tsx no longer names the board"
+    assert "Live Trading Leaderboard" not in source, "Race.tsx still uses the retired name"
+    assert "Live Leaderboard" in _shipped_text(), (
         "Race.tsx names the board but the shipped bundle does not — "
         "rebuild per dashboard/landing/README.md"
     )

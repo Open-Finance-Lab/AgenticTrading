@@ -24,7 +24,7 @@ const BOARD_RULES = [
   },
   {
     icon: TrendingUp,
-    text: "Live Trading Leaderboard: moves forward one trading session at a time, over the current calendar month.",
+    text: "Live Leaderboard: moves forward one trading session at a time, over the current calendar month.",
   },
   {
     icon: ShieldCheck,
@@ -156,7 +156,7 @@ export function Race() {
                 Home blurb and About card -- pinned together by
                 test_live_board_copy_agrees_across_surfaces. */}
             <p className="text-xs text-muted-foreground mb-8">
-              The Live Trading Leaderboard is in preview for Season 0: the current calendar month,
+              The Live Leaderboard is in preview for Season 0: the current calendar month,
               updated after each trading session closes. Read its standings as a preview, not an
               official result.
             </p>
