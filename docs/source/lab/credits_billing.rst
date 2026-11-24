@@ -8,9 +8,10 @@ per step of the agent's pipeline, so a three-step agent makes three calls per
 decision, plus any post-trade review — and those calls cost money. Before such a
 backtest can start you sign in and choose who pays for them: **your own API
 key**, or **ATL Credits**. Rule-based backtests make no model calls, need no
-account and cost nothing. The hosted AI Hedge Fund runtime runs on a model the
-platform manages: it needs you to sign in, shows no billing choice and is always
-paid for with ATL Credits (see :ref:`ai-hedge-fund-credits`).
+account and cost nothing. The hosted AI Hedge Fund and TradingAgents runtimes
+run on a model the platform manages: they need you to sign in, show no billing
+choice and are always paid for with ATL Credits (see
+:ref:`ai-hedge-fund-credits`).
 :doc:`Research Agents <research_agents>` runs are paid for with ATL Credits too
 (see :ref:`research-credits`).
 
@@ -45,8 +46,8 @@ two options.
 
 If neither option is available to you yet, the dialog offers **Go to API Keys**
 so you can add and verify a key. The switch only appears for LLM-driven runs;
-rule-based runs do not show it, and neither does the hosted AI Hedge Fund
-runtime, which always uses ATL Credits.
+rule-based runs do not show it, and neither do the hosted AI Hedge Fund and
+TradingAgents runtimes, which always use ATL Credits.
 
 
 Use your own API key
@@ -121,19 +122,23 @@ is in progress its hold is not available to spend on backtests.
 
 .. _ai-hedge-fund-credits:
 
-AI Hedge Fund runs
-~~~~~~~~~~~~~~~~~~
+AI Hedge Fund and TradingAgents runs
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The hosted AI Hedge Fund runtime is billed per decision rather than per call,
-because each decision makes several model calls (one per analyst and one for
-the portfolio manager, for every asset). Before each decision ATL holds the
+The hosted AI Hedge Fund and TradingAgents runtimes are billed per decision
+rather than per call, because each decision makes several model calls. An AI
+Hedge Fund decision makes one per analyst and one for the portfolio manager,
+for every asset; a TradingAgents decision runs its whole research desk —
+analyst, bull/bear debate, trader and risk review — on one ticker, once per
+trading day. Before each decision ATL holds the
 most it could cost, then charges the input and output tokens its model calls
 report and releases the rest. A decision that makes no model calls costs
 nothing.
 
 When ATL cannot tell what a decision used, it charges the full hold rather than
 nothing: if a call reports no usage, or the decision is cut short by a timeout,
-a crash or a **Cancel** while it is running.
+a crash or a **Cancel** while it is running. A decision that fails before its
+first model call is released and costs nothing.
 
 Before the run starts, your balance must cover the most the whole window could
 cost: one decision per trading day, each at its maximum. Other backtests you

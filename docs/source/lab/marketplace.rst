@@ -97,6 +97,15 @@ instruction to try the model yourself.
        and tests them through backtesting. A hosted runtime based on the
        open-source `AI Hedge Fund <https://github.com/virattt/ai-hedge-fund>`_
        project by virattt.
+   * - **TradingAgents**
+     - Platform-managed (shown on **Configure**)
+     - U.S.
+     - A research desk that studies one ticker before each trading day —
+       market analysis, a bull/bear debate, a trader plan and a risk review —
+       then hands one rating to the backtest engine. A hosted runtime based on
+       the open-source
+       `TradingAgents <https://github.com/TauricResearch/TradingAgents>`_
+       project by Tauric Research.
    * - **Blue-Chip Steady**
      - ``anthropic/claude-haiku-4-5``
      - U.S.
@@ -154,11 +163,12 @@ Add one to My Agents
 2. For an LLM or an Agent, you land on **Playground → My Agents** and the new
    agent's **Configure** screen opens straight away, owned by you. A template
    with a prompt pipeline arrives with its instruction already filled in; the
-   hosted AI Hedge Fund template shows a managed model and an analyst panel
-   instead of an instruction.
+   hosted templates (AI Hedge Fund, TradingAgents) show a managed model and an
+   analyst panel instead of an instruction.
 3. Rename it, change the model and instruction where the template allows it,
    or set its capital, then close the editor to find the agent on your **My Agents** grid. It lands
-   under **Open Agents** if the template is a hosted runtime (AI Hedge Fund),
+   under **Open Agents** if the template is a hosted runtime (AI Hedge Fund or
+   TradingAgents),
    and under **LLMs** otherwise. Your agent is an independent copy —
    later edits to the template do not touch it, and your edits never affect
    anyone else's. The market the template trades is a separate setting:
@@ -187,6 +197,17 @@ workbench. See :doc:`research_agents`.
    signed in: it runs on a model the platform manages and is always paid for
    with ATL Credits, so there is no billing choice, and it also needs a
    Financial Datasets API key saved on the agent before it will run.
+   The hosted TradingAgents template also needs you to be signed in and is
+   always paid for with ATL Credits, but needs no key of yours. It analyses
+   **one ticker per run**: in the **Run Backtest** dialog, pick a single
+   company on the **Custom** tab. Only the **Market Analyst** can be used in a
+   backtest; the Social, News and Fundamentals analysts read data as of today
+   rather than as of the backtest date, so **Configure** shows them as
+   *unavailable*. A run covers a few trading days at most (five by default),
+   because each day's decision takes several minutes. One position may use at
+   most 20% of equity — $200 of the default $1,000 — so a stock priced above
+   that can never be bought and the run stays flat; pick a lower-priced symbol
+   or raise the backtesting capital.
    Neither leaderboard takes submissions, so your own copy is never ranked on
    either one.
 

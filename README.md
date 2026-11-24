@@ -122,7 +122,7 @@ Test agents under changing market conditions with configurable risk policies, ap
 - **Open agent ecosystem**  
 Grow Agent Cards, reproducible submissions, competitions, and an open leaderboard toward hundreds and eventually thousands of reusable agent instances.
 
-Progress so far: news sentiment comes from Agentic FinSearch (Home panel + v2 agent context), with Reddit/social sentiment still planned. The live feed is paused for now, so the Home panel shows a labelled demo snapshot. Under *Broader agent and tool connectivity*, the first external-framework adapter has shipped — [TradingAgents](https://github.com/TauricResearch/TradingAgents) runs locally on your own model and data credentials and replays its decisions through the Python SDK ([setup guide](docs/integrations/tradingagents.zh-CN.md), written in Simplified Chinese) — while MCP, broker, and data-provider adapters are still ahead.
+Progress so far: news sentiment comes from Agentic FinSearch (Home panel + v2 agent context), with Reddit/social sentiment still planned. The live feed is paused for now, so the Home panel shows a labelled demo snapshot. Under *Broader agent and tool connectivity*, the first external-framework adapter has shipped in two forms: [TradingAgents](https://github.com/TauricResearch/TradingAgents) is a hosted template in the Agent Supermarket (sign in, add it, backtest it; ATL runs it on a platform-managed model and bills your ATL Credits), and it can also run locally on your own model and data credentials and replay its decisions through the Python SDK ([setup guide](docs/integrations/tradingagents.zh-CN.md), written in Simplified Chinese). MCP, broker, and data-provider adapters are still ahead.
 
 ## Citation
 

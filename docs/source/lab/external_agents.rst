@@ -371,7 +371,15 @@ TradingAgents integration
 
 ATL includes a client-side bridge for
 `TauricResearch/TradingAgents <https://github.com/TauricResearch/TradingAgents>`_.
-TradingAgents runs locally with the user's own model and data credentials, writes
+
+.. note::
+
+   This section covers running TradingAgents yourself. To run it without
+   installing anything, add the hosted **TradingAgents** template from the
+   Agent Supermarket instead: ATL runs it on a platform-managed model and bills
+   your ATL Credits (see :doc:`marketplace` and :doc:`credits_billing`).
+
+With this bridge, TradingAgents runs locally with the user's own model and data credentials, writes
 a replayable decision artifact, and ATL handles T+1 simulation, metrics, curves,
 and Agent Cards. Expensive multi-agent analysis is
 completed before the hourly ATL loop, so replay stays inside the step deadline.
