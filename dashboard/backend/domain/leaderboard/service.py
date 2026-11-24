@@ -604,6 +604,17 @@ def verify_daily_refresh_secret(provided: Optional[str]) -> None:
 # explicitly the one whose results nobody should read as a standing. Mirrors
 # PREVIEW_SEASON_NUMBER in dashboard/frontend/js/leaderboard.js.
 PREVIEW_SEASON_NUMBER = 0
+# The Live board's name and season label have exactly one owner: this pair.
+# resolve_leaderboard_config("live"), live.live_freeze_config and the payload
+# live.get_live_leaderboard serves all read them, and the static fallbacks in
+# app.html / js/live-leaderboard.js are pinned to them by
+# tests/test_frontend_live_leaderboard.py. "Trading" is dropped from the name
+# because it read as real orders and collided with the Robinhood live-trading
+# docs (docs/superpowers/specs/2026-10-14-atl-direction.md §6). The label is
+# built from PREVIEW_SEASON_NUMBER so the number keeps one owner, and says
+# "preview" until a season counts (Season 1 waits for the new engine).
+LIVE_BOARD_TITLE = "Live Leaderboard"
+LIVE_PHASE_LABEL = f"Season {PREVIEW_SEASON_NUMBER} · preview"
 DEFAULT_SEASON_TRADING_DAYS = 10
 # One calendar year of weekday sessions. An upper bound rather than a sanity
 # check: `season_window` walks the calendar one day at a time and runs inside a
@@ -748,7 +759,7 @@ def build_season_payload(
     config: Dict[str, Any],
     as_of: Optional[Union[date, datetime]] = None,
 ) -> Dict[str, Any]:
-    """The season block the Live Trading tab renders.
+    """The season block the Live tab renders.
 
     NOTHING HERE MAY CLAIM AN ADVANCE. ``last_advanced_date`` stays None and
     ``trading_days_elapsed`` stays 0 because no season has advanced -- there is
@@ -841,11 +852,11 @@ def resolve_leaderboard_config(period: Optional[str] = "contest") -> Dict[str, A
                 "ranking on this board counts. There is no advance engine yet."
             ),
             "period": "live",
-            "board_title": "Live Trading Leaderboard",
+            "board_title": LIVE_BOARD_TITLE,
             # Derived, never spelled out: a literal "Season 0" here is a second
             # owner of the season number, and the first thing the advance engine
-            # does is bump PREVIEW_SEASON_NUMBER.
-            "phase_label": f"Season {PREVIEW_SEASON_NUMBER}",
+            # does is bump PREVIEW_SEASON_NUMBER, which LIVE_PHASE_LABEL is built from.
+            "phase_label": LIVE_PHASE_LABEL,
             "standings_label": "Ranking",
         }
     return {

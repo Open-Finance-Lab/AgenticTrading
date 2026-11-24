@@ -72,8 +72,8 @@ convinced them.
 | Label | **none** — the `03 — Race` mono-label was dropped when the board moved into the hero. Talk (01) and Test (02) keep theirs; the board is the first thing on the page, so numbering it third described the wrong page. |
 | H2 | What the AI models actually returned |
 | Body (1 line) | Seven leading AI models traded the same days with simulated money, ranked against buy-and-hold and the index. Only one finished ahead of both. |
-| Rules (3 bullets max, each with an icon) | Competition: one fixed window of market history — the same days and the same starting capital for every contender. (`CalendarClock`) · Live Trading Leaderboard: designed to move forward one trading session at a time, in two-week seasons. (`TrendingUp`) · Published only if the AI model itself made at least 95% of the decisions. (`ShieldCheck`) |
-| Preview note | The Live Trading Leaderboard is in preview for Season 0. It has not moved forward a session yet, and nothing on it is a record. Season 1 is the first that counts. |
+| Rules (3 bullets max, each with an icon) | Competition: one fixed window of market history — the same days and the same starting capital for every contender. (`CalendarClock`) · Live Leaderboard: designed to move forward one trading session at a time, in two-week seasons. (`TrendingUp`) · Published only if the AI model itself made at least 95% of the decisions. (`ShieldCheck`) |
+| Preview note | The Live Leaderboard is in preview for Season 0. It has not moved forward a session yet, and nothing on it is a record. Season 1 is the first that counts. |
 | Standings card | Competition Standings (`Illustrative example` chip) |
 | Primary CTA | Start Free (`PRIMARY_LANDING_CTA`) |
 

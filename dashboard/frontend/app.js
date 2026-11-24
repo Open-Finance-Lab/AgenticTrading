@@ -11886,7 +11886,7 @@ function showPortfolioManagementDemo(panel) {
 }
 
 function showCompetitionPanel(tab) {
-    // The Daily Leaderboard was replaced by the Live Trading board. A saved
+    // The Daily Leaderboard was replaced by the Live board. A saved
     // nav state or a cached boot script can still hand us either retired key
     // ('daily', or 'season' from an earlier build of this branch), and an
     // unrecognised tab here shows no panel at all — a blank Competition page.

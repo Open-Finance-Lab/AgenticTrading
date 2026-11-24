@@ -74,7 +74,7 @@ def api_get_leaderboard(
     Pass ?refresh=true to recompute (e.g. after config change); operators only,
     with X-Leaderboard-Refresh-Secret or an admin session, else 403.
     Pass ?period=daily for the rolling one-day board (weekends show Friday).
-    Pass ?period=live for the current calendar-month Live Trading Leaderboard
+    Pass ?period=live for the current calendar-month Live Leaderboard
     (freeze-window snapshots under leaderboard-live; GET never deploys models).
     """
     # Public, unauthenticated endpoint: no exception text reaches the caller.
@@ -181,7 +181,7 @@ def api_refresh_live_leaderboard(
     force: bool = Query(default=False, description="Replay the whole month from the 1st."),
     x_leaderboard_refresh_secret: str | None = Header(default=None, alias="X-Leaderboard-Refresh-Secret"),
 ):
-    """Cron hook: enqueue a Live Trading Leaderboard increment (non-blocking).
+    """Cron hook: enqueue a Live Leaderboard increment (non-blocking).
 
     Uses the same ``LEADERBOARD_DAILY_REFRESH_SECRET`` as the daily board.
     Returns **202 Accepted**; model steps run in a background thread. Public GET

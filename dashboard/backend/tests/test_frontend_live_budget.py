@@ -46,7 +46,8 @@ _HALT_LINE = (
     "Baselines keep updating."
 )
 
-# A board with prints, current, and models cached: the existing banner is hidden.
+# A board with prints, current, and a printed model row (_banner_after adds
+# it): the existing banner is hidden.
 _HEALTHY = {
     "has_prints": True,
     "snapshot_stale": False,
@@ -67,8 +68,25 @@ def _attempt(outcome, kind=None, on="2026-08-27"):
     }
 
 
+# The banner reads the rows, not live_status.models_cached (#586): with no
+# printed model row it says model curves have not appeared yet. A healthy board
+# therefore needs one printed, current model row for the banner to stay hidden.
+_PRINTED_MODEL = {
+    "entry_id": "deepseek_v4_pro",
+    "model": "DeepSeek V4 Pro",
+    "is_model": True,
+    "status": "frozen",
+    "portfolio_value": 100500,
+    "snapshot_end": "2026-08-27",
+}
+
+
 def _banner_after(status):
-    payload = {"window": {"label": "2026-08-01 — 2026-08-31"}, "entries": [], "live_status": status}
+    payload = {
+        "window": {"label": "2026-08-01 — 2026-08-31"},
+        "entries": [_PRINTED_MODEL],
+        "live_status": status,
+    }
     return _run_live_js(
         f"updateLiveHeader({json.dumps(payload)});"
         "const b = document.getElementById('livePhaseBanner');"
