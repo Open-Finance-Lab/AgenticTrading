@@ -204,6 +204,17 @@ class LLMExecutionResult(BaseModel):
     sampling_wire: str | None = Field(default=None, max_length=128)
 
 
+class LLMEmptyReplyResult(LLMExecutionResult):
+    """The billed evidence of a call whose reply carried no text.
+
+    Never returned as an answer: the service attaches it to the empty-reply
+    error (``LLMExecutionError.billed_result``) so the run summary and the
+    analytics usage event count a generation the provider billed (#556).
+    """
+
+    text: str = Field(default="", max_length=0)
+
+
 class LLMRunEvidence(BaseModel):
     """Secret-free aggregate of every completed model call in one run."""
 
@@ -300,6 +311,7 @@ __all__ = [
     "BillingEvidence",
     "BillingMode",
     "LLMExecutionRequest",
+    "LLMEmptyReplyResult",
     "LLMExecutionResult",
     "LLMRunEvidence",
     "LLMMessage",

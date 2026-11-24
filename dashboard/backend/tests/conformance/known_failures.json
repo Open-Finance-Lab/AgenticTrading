@@ -273,7 +273,6 @@
       "fills[o2@2026-03-02T11:30:00-05:00]: expected price 375 qty 0.0859375, actual no fill on that bar"
     ],
     "invariants": [
-      "invariant 7: o1 has 0 terminal OrderFinal(s), expected 1",
       "invariant 7: o2 has 0 terminal OrderFinal(s), expected 1"
     ],
     "positions": [

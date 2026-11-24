@@ -213,8 +213,17 @@ class CustomAlgoPortfolioManager(PortfolioManager):
                 continue
 
             if action_type == "buy":
-                shares = int(item.get("position_size") or 0)
-                if shares <= 0:
+                # The backtest gate's size reading (_read_buy_size): only a
+                # missing/null/empty/0 size is sized from confidence. int()
+                # here made 0.6, -0.5 and even -3 an engine-sized buy in the
+                # model's name, and True one share (#675).
+                shares, refusal, _asked = self._read_buy_size(
+                    item.get("position_size")
+                )
+                if refusal is not None:
+                    print(f"   Skip BUY {symbol}: {refusal}")
+                    continue
+                if shares == 0:
                     if confidence is None:
                         print(f"   Skip BUY {symbol}: no position_size, and no 0-1 confidence to size it from")
                         continue
