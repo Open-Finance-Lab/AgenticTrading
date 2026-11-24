@@ -5,10 +5,13 @@ Extracted (Phase 2B3) from ``PortfolioManager.execute_actions`` in
 execution logic over explicit state (cash, positions, entry prices, trades). The
 legacy method now delegates here.
 
-With ``t_plus_one_enabled=False`` (the default), behavior remains identical to
-the original method, with one deliberate exception: a BUY keeps the position's
-average cost in ``entry_prices`` instead of overwriting it with the last fill
-(conformance defect D14, avg-cost half). In particular:
+A BUY keeps the position's share-weighted average cost in ``entry_prices``
+instead of overwriting it with the last fill (conformance defect D14, avg-cost
+half). The BUY branch is shared, so this holds on both the legacy and the T+1
+path, and it is the one deliberate departure from the original method.
+
+Apart from that, with ``t_plus_one_enabled=False`` (the default), behavior
+remains identical to the original method. In particular:
 
 * action fields are read with ``action.get("symbol")``, ``action.get("action")``,
   ``action.get("shares", 0)``, ``action.get("reason", "")``;

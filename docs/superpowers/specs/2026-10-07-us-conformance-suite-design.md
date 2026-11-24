@@ -705,7 +705,7 @@ This ports `tests/scenarios/factory.py` and `tests/oracle/engine.py` (MIT), long
 | O01–O04 | N/E | N/E | D12 |
 | CA01–CA03 | FAIL | FAIL | D13 |
 | CA04 | N/E | N/E | D12, D13 |
-| M01 | FAIL | FAIL | D1, D3, D14 |
+| M01 | FAIL | FAIL | D1, D3 *(D14 until 2026-10-28, when the avg-cost half was fixed)* |
 | M02 | FAIL | FAIL | D14 |
 | M03 | FAIL (Sharpe) | FAIL | D15 |
 
